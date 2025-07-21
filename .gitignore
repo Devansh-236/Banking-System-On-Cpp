@@ -1,0 +1,43 @@
+# Compiled Object files
+*.o
+*.obj
+
+# Executables
+*.exe
+*.out
+build/bin/*
+
+# Build directories
+build/
+obj/
+
+# Data files (sensitive information)
+data/*.dat
+backup/*.dat
+
+# Log files
+logs/*.log
+
+# IDE files
+.vscode/
+.idea/
+*.vcxproj*
+*.sln
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*~
+
+# Debug files
+*.pdb
+*.dSYM/
