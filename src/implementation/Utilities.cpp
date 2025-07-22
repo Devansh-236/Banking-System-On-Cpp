@@ -1,4 +1,4 @@
-#include "headers/Utilities.h"
+#include "Utilities.h"
 #include <ctime>
 #include <string>
 #include <sstream>
@@ -121,3 +121,19 @@ bool isValidAccountNumber(const string& accountNumber) {
 bool isValidAmount(const double& amount) {
     return amount >= 0.0; // Valid amounts are non-negative
 }
+// Add to Utilities.cpp
+string getCurrentDateTime() {
+    time_t now = time(0);
+    tm* ltm = localtime(&now);
+    
+    stringstream ss;
+    ss << (1900 + ltm->tm_year) << "-"
+       << setfill('0') << setw(2) << (1 + ltm->tm_mon) << "-"
+       << setfill('0') << setw(2) << ltm->tm_mday << " "
+       << setfill('0') << setw(2) << ltm->tm_hour << ":"
+       << setfill('0') << setw(2) << ltm->tm_min << ":"
+       << setfill('0') << setw(2) << ltm->tm_sec;
+    
+    return ss.str();
+}
+

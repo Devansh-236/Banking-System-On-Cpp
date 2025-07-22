@@ -1,6 +1,6 @@
-#include "headers/Customer.h"
-#include "headers/Account.h"
-#include "headers/Utilities.h"
+#include "Customer.h"
+#include "Account.h"
+#include "Utilities.h"
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
