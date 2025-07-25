@@ -4,10 +4,10 @@
 #include <string>
 #include <vector>
 #include "Account.h"
-
+class Bank;
 using namespace std;
-
 class Customer {
+    friend class Bank; // Grant Bank access to private members
 private:
     string customerId;
     string name;
@@ -19,6 +19,10 @@ private:
     string registrationDate;
     bool isActive;
 
+protected:
+    string getHashedPin() const {
+        return hashedPin; // For internal use, not exposed publicly
+    }
 public:
     // Constructor
     Customer(string id, string customerName, string addr, string phone, string mail, string pin);

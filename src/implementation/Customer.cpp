@@ -36,7 +36,6 @@ Customer::Customer(string id, string customerName, string addr, string phone, st
     cout << "Customer Address: " << address << endl;
     cout << "Customer Phone: " << phoneNumber << endl;
     cout << "Customer Email: " << email << endl;
-    cout << "Customer PIN (hashed): " << hashedPin << endl;
     cout << "Customer accounts initialized (empty)." << endl;
     cout << "----------------------------------------" << endl;
 }
@@ -209,12 +208,6 @@ bool Customer::verifyPin(string inputPin) const {
 
 // Change customer PIN
 bool Customer::changePin(string oldPin, string newPin) {
-    // TODO: PIN change logic
-    // 1. First verify the old PIN using verifyPin()
-    // 2. If old PIN is correct, validate new PIN (length, format)
-    // 3. Hash the new PIN and store it
-    // 4. Display success/failure message
-    // 5. Return true if successful, false otherwise
     if (!verifyPin(oldPin)) {
         cout << "Error: Old PIN verification failed." << endl;
         return false;

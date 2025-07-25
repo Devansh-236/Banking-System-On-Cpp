@@ -384,8 +384,7 @@ TransactionManager::~TransactionManager()
 }
 
 // Process deposit transaction
-string TransactionManager::processDeposit(string accountNumber, double amount, string description,
-                                          double balanceBefore, double balanceAfter, string customerId)
+string TransactionManager::processDeposit(string accountNumber, double amount, string description,double balanceBefore, double balanceAfter, string customerId)
 {
     string transactionId = generateTransactionId();
     Transaction transaction(transactionId, accountNumber, TransactionType::DEPOSIT, amount,
@@ -879,9 +878,6 @@ bool TransactionManager::loadTransactionHistory()
 // Display transaction statistics
 void TransactionManager::displayTransactionStatistics() const
 {
-    // TODO: Display system-wide transaction statistics
-    // Include: Total transactions, total volume, transaction types breakdown,
-    // successful vs failed transactions, etc.
     cout << "Transaction Statistics:" << endl;
     cout << "----------------------------------------" << endl;
     cout << "Total Transactions: " << transactionHistory.size() << endl;
