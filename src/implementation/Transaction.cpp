@@ -623,9 +623,15 @@ bool TransactionManager::addTransaction(Transaction transaction)
     string date = transaction.getTimestamp().substr(0, 10); // Use date part
     dateTransactions.emplace(date, transactionId);
     // Update next transaction number if necessary
-    if (nextTransactionNumber <= stoi(transactionId.substr(3)))
+    size_t lastDash = transactionId.find_last_of('-');
+    if (lastDash != string::npos && lastDash + 1 < transactionId.length())
     {
-        nextTransactionNumber = stoi(transactionId.substr(3)) + 1; // Increment
+        string numericPart = transactionId.substr(lastDash + 1);
+        int txnNumber = stoi(numericPart);
+        if (nextTransactionNumber <= txnNumber)
+        {
+            nextTransactionNumber = txnNumber + 1;
+        }
     }
     cout << "Transaction " << transactionId << " added successfully." << endl;
     return true; // Successfully added
@@ -775,8 +781,11 @@ double TransactionManager::getTotalDeposits(string accountNumber, string startDa
 // Generate unique transaction ID
 string TransactionManager::generateTransactionId()
 {
+    string dateStr = getCurrentDate();
+    dateStr.erase(remove(dateStr.begin(), dateStr.end(), '-'), dateStr.end());
+
     stringstream ss;
-    ss << "TXN" << getCurrentDateTime().substr(0, 8) << setw(3) << setfill('0') << nextTransactionNumber++;
+    ss << "TXN" << dateStr << setfill('0') << setw(3) << nextTransactionNumber++;
     return ss.str();
 }
 
@@ -851,9 +860,15 @@ bool TransactionManager::loadTransactionHistory()
         // Add to date transactions
         dateTransactions.emplace(timestamp.substr(0, 10), txnId); // Use date part
         // Update next transaction number
-        if (nextTransactionNumber <= stoi(txnId.substr(3)))
+        size_t lastDash = txnId.find_last_of('-');
+        if (lastDash != string::npos && lastDash + 1 < txnId.length())
         {
-            nextTransactionNumber = stoi(txnId.substr(3)) + 1; // Increment
+            string numericPart = txnId.substr(lastDash + 1);
+            int txnNumber = stoi(numericPart);
+            if (nextTransactionNumber <= txnNumber)
+            {
+                nextTransactionNumber = txnNumber + 1;
+            }
         }
     }
     file.close();
@@ -1192,4 +1207,247 @@ void TransactionManager::displayCustomerTransactionSummary(string customerId) co
         count++;
     }
     cout << "======================================================" << endl;
+}
+// Get total transaction count
+int TransactionManager::getTotalTransactionCount() const
+{
+    return transactionHistory.size();
+}
+
+// Get total system volume
+double TransactionManager::getTotalSystemVolume() const
+{
+    double totalVolume = 0.0;
+    for (const auto &txn : transactionHistory)
+    {
+        totalVolume += txn.second.getNetAmount(); // Sum net amounts of all transactions
+    }
+    return totalVolume;
+}
+// Display transactions by type
+void TransactionManager::displayTransactionsByType(TransactionType type, int limit) const
+{
+    vector<Transaction> transactions = getTransactionsByType(type, limit);
+    cout << "Transactions of Type: " << static_cast<int>(type) << endl;
+    cout << "--------------------------------------------------------" << endl;
+    cout << left << setw(15) << "Transaction ID"
+         << setw(20) << "Account Number"
+         << setw(10) << "Amount"
+         << setw(20) << "Date"
+         << setw(20) << "Status"
+         << setw(30) << "Description" << endl;
+    cout << "--------------------------------------------------------" << endl;
+    double totalAmount = 0.0;
+    for (const Transaction &txn : transactions)
+    {
+        cout << left << setw(15) << txn.getTransactionId()
+             << setw(20) << txn.getAccountNumber()
+             << setw(10) << fixed << setprecision(2) << txn.getAmount()
+             << setw(20) << txn.getTimestamp().substr(0, 10)
+             << setw(20) << txn.getStatusString()
+             << setw(30) << txn.getDescription() << endl;
+        totalAmount += txn.getAmount(); // Accumulate total amount
+    }
+    cout << "--------------------------------------------------------" << endl;
+    cout << left << setw(15) << "Total"
+         << setw(20) << ""
+         << setw(10) << fixed << setprecision(2) << totalAmount
+         << setw(20) << ""
+         << setw(20) << ""
+         << setw(30) << "" << endl;
+    cout << "Total Transactions: " << transactions.size() << endl;
+    cout << "Total Amount: " << fixed << setprecision(2) << totalAmount << endl;
+    cout << "--------------------------------------------------------" << endl;
+    cout << "End of Transactions of Type: " << static_cast<int>(type) << endl;
+    cout << "--------------------------------------------------------" << endl;
+}
+
+// Display daily transaction summary
+void TransactionManager::displayDailyTransactionSummary(string date) const
+{
+    vector<Transaction> transactions = getTransactionsByDateRange(date, date);
+    if (transactions.empty())
+    {
+        cout << "No transactions found for date: " << date << endl;
+        return; // No transactions for the date
+    }
+
+    // Group transactions by type
+    map<TransactionType, vector<Transaction>> groupedTransactions;
+    for (const auto &txn : transactions)
+    {
+        groupedTransactions[txn.getTransactionType()].push_back(txn);
+    }
+
+    // Calculate totals for each type
+    map<TransactionType, double> typeTotals;
+    for (const auto &[type, txns] : groupedTransactions)
+    {
+        double total = 0.0;
+        for (const auto &txn : txns)
+        {
+            total += txn.getAmount();
+        }
+        typeTotals[type] = total;
+    }
+
+    // Display report
+    cout << "Daily Transaction Summary for Date: " << date << endl;
+    cout << "--------------------------------------------------------" << endl;
+    for (const auto &[type, total] : typeTotals)
+    {
+        cout << "Transaction Type: " << static_cast<int>(type) << endl;
+        cout << "Total Transactions: " << groupedTransactions[type].size() << endl;
+        cout << "Total Amount: " << fixed << setprecision(2) << total << endl;
+        cout << "--------------------------------------------------------" << endl;
+    }
+
+    // Display all transactions
+    cout << "All Transactions for Date: " << date << endl;
+    cout << "--------------------------------------------------------" << endl;
+    for (const auto &txn : transactions)
+    {
+        cout << left << setw(15) << txn.getTransactionId()
+             << setw(20) << txn.getAccountNumber()
+             << setw(10) << fixed << setprecision(2) << txn.getAmount()
+             << setw(20) << txn.getTimestamp().substr(0, 10)
+             << setw(20) << txn.getStatusString()
+             << setw(30) << txn.getDescription() << endl;
+    }
+    cout << "--------------------------------------------------------" << endl;
+    double netFlow = 0.0;
+    for (const auto &txn : transactions)
+    {
+        netFlow += txn.getNetAmount(); // Calculate net flow for the day
+    }
+    cout << "Net Flow for Date: " << date << " is " << fixed << setprecision(2) << netFlow << endl;
+    cout << "--------------------------------------------------------" << endl;
+    cout << "End of Daily Transaction Summary" << endl;
+    cout << "--------------------------------------------------------" << endl;
+}
+// Validate transaction ID format
+bool TransactionManager::isValidTransactionId(string transactionId) const
+{
+    if (transactionId.size() < 15 || transactionId.substr(0, 3) != "TXN")
+    {
+        return false; // Invalid prefix
+    }
+    string datePart = transactionId.substr(3, 10); // Extract date part
+    if (datePart.size() != 10 || datePart[4] != '-' || datePart[7] != '-')
+    {
+        return false; // Invalid date format
+    }
+    string seqPart = transactionId.substr(13); // Extract sequence part
+    if (seqPart.empty() || !isdigit(seqPart[0]))
+    {
+        return false; // Invalid sequence format
+    }
+    return true; // Valid format
+}
+
+// Get current date (wrapper function)
+string TransactionManager::getCurrentDate() const
+{
+    return ::getCurrentDateTime().substr(0, 10); // Return current date in YYYY-MM-DD format
+}
+// Export transactions to CSV
+bool TransactionManager::exportTransactionsToCSV(string filename, string accountNumber) const
+{
+    ofstream file(filename);
+    if (!file.is_open())
+    {
+        cout << "Failed to open file for writing: " << filename << endl;
+        return false; // File could not be opened
+    }
+
+    // Write CSV header
+    file << "ID,Account,Type,Amount,Date,Status,Description" << endl;
+
+    // Write each transaction as CSV row
+    for (const auto &txn : transactionHistory)
+    {
+        if (!accountNumber.empty() && txn.second.getAccountNumber() != accountNumber)
+        {
+            continue; // Skip transactions not matching accountNumber
+        }
+        file << txn.second.getTransactionId() << ","
+             << txn.second.getAccountNumber() << ","
+             << static_cast<int>(txn.second.getTransactionType()) << ","
+             << fixed << setprecision(2) << txn.second.getAmount() << ","
+             << txn.second.getTimestamp().substr(0, 10) << ","
+             << txn.second.getStatusString() << ","
+             << txn.second.getDescription() << endl;
+    }
+
+    file.close();
+    return true; // Export successful
+}
+
+// Create backup of transaction data
+bool TransactionManager::createBackup(string backupPath) const
+{
+    string backupFile = backupPath + "/transaction_backup_" + getCurrentDateTime() + ".log";
+    ifstream src(logFilePath, ios::binary);
+    ofstream dst(backupFile, ios::binary);
+    if (!src.is_open() || !dst.is_open())
+    {
+        cout << "Failed to create backup file: " << backupFile << endl;
+        return false; // Backup file could not be opened
+    }
+    dst << src.rdbuf(); // Copy contents
+    src.close();
+    dst.close();
+    cout << "Backup created successfully at: " << backupFile << endl;
+    return true; // Backup successful
+}
+
+// Cleanup old transactions (archival)
+void TransactionManager::cleanupOldTransactions(int daysOld)
+{
+    string cutoffDate = getCurrentDateTime(); // Placeholder for actual cutoff date calculation
+    cout << "Cleaning up transactions older than " << daysOld << " days..." << endl;
+    int removedCount = 0;
+    for (auto it = transactionHistory.begin(); it != transactionHistory.end();)
+    {
+        const Transaction &txn = it->second;
+        if (txn.getTimestamp() < cutoffDate) // Check if transaction is older than cutoff
+        {
+            // Remove from all indexes
+            accountTransactions.erase(txn.getAccountNumber());
+            customerTransactions.erase(txn.getCustomerId());
+            dateTransactions.erase(txn.getTimestamp().substr(0, 10)); // Use date part only
+            it = transactionHistory.erase(it);                        // Remove from history and get next iterator
+            removedCount++;                                           // Increment removed count
+            cout << "Removed transaction: " << txn.getTransactionId() << endl;
+        }
+        else
+        {
+            ++it; // Move to next transaction
+        }
+    }
+    cout << "Cleanup complete. Removed " << removedCount << " old transactions." << endl;
+}
+// Rebuild transaction indexes
+void TransactionManager::reindexTransactions()
+{
+    cout << "Rebuilding transaction indexes..." << endl;
+    accountTransactions.clear();
+    customerTransactions.clear();
+    dateTransactions.clear();
+    for (const auto &pair : transactionHistory)
+    {
+        const Transaction &txn = pair.second;
+        accountTransactions.emplace(txn.getAccountNumber(), txn.getTransactionId());
+        customerTransactions.emplace(txn.getCustomerId(), txn.getTransactionId());
+        dateTransactions.emplace(txn.getTimestamp().substr(0, 10), txn.getTransactionId()); // Use date part only
+    }
+    cout << "Transaction indexes rebuilt successfully." << endl;
+    cout << "Total Transactions: " << transactionHistory.size() << endl;
+    cout << "Total Accounts: " << accountTransactions.size() << endl;
+    cout << "Total Customers: " << customerTransactions.size() << endl;
+    cout << "Total Dates: " << dateTransactions.size() << endl;
+    cout << "Reindexing complete." << endl;
+    cout << "--------------------------------------------------------" << endl;
+    cout << "End of Transaction Manager Operations" << endl;
+    cout << "--------------------------------------------------------" << endl;
 }
