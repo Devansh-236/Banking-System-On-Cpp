@@ -5,8 +5,51 @@
 #include <fstream>
 #include <algorithm>
 #include <sstream>
+#include <filesystem>
 
 using namespace std;
+namespace fs = std::filesystem;
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+// Numeric sequence part of a TXNyyyymmddNNNNNN id (-1 if not in that format)
+static long long transactionSequence(const string& transactionId) {
+    if (transactionId.size() < 12 || transactionId.compare(0, 3, "TXN") != 0) {
+        return -1;
+    }
+    string digits = transactionId.substr(11);
+    if (digits.empty() || !all_of(digits.begin(), digits.end(), [](char c) { return isdigit(static_cast<unsigned char>(c)); })) {
+        return -1;
+    }
+    try {
+        return stoll(digits);
+    } catch (...) {
+        return -1;
+    }
+}
+
+// Newest first: by timestamp, then by sequence number for same-second transactions
+static bool newestFirst(const Transaction& a, const Transaction& b) {
+    if (a.getTimestamp() != b.getTimestamp()) {
+        return a.getTimestamp() > b.getTimestamp();
+    }
+    return transactionSequence(a.getTransactionId()) > transactionSequence(b.getTransactionId());
+}
+
+// Quote a CSV field if it contains separators or quotes
+static string csvField(const string& value) {
+    if (value.find_first_of(",\"\n") == string::npos) {
+        return value;
+    }
+    string quoted = "\"";
+    for (char c : value) {
+        if (c == '"') quoted += "\"\"";
+        else quoted += c;
+    }
+    return quoted + "\"";
+}
 
 // =============================================================================
 // TRANSACTION CLASS IMPLEMENTATIONS
@@ -20,7 +63,7 @@ Transaction::Transaction()
     relatedAccountNumber = "";
     transactionType = TransactionType::UNKNOWN;
     amount = 0.0;
-    timestamp = getCurrentDateTime();
+    timestamp = ::getCurrentDateTime();
     description = "";
     balanceBefore = 0.0;
     balanceAfter = 0.0;
@@ -28,6 +71,7 @@ Transaction::Transaction()
     customerId = "";
     sessionId = "";
     notes = "";
+    linkedTransactionId = "";
 }
 
 // Parameterized constructor
@@ -38,15 +82,16 @@ Transaction::Transaction(string txnId, string accNum, TransactionType type, doub
     accountNumber = accNum;
     relatedAccountNumber = "";
     transactionType = type;
-    amount = amt;
-    timestamp = getCurrentDateTime();
-    description = desc;
-    balanceBefore = beforeBal;
-    balanceAfter = afterBal;
+    amount = roundMoney(amt);
+    timestamp = ::getCurrentDateTime();
+    description = trim(desc);
+    balanceBefore = roundMoney(beforeBal);
+    balanceAfter = roundMoney(afterBal);
     status = TransactionStatus::COMPLETED; // Default to completed
     customerId = custId;
-    sessionId = ""; // Set to empty by default
-    notes = "";     // Set to empty by default
+    sessionId = "";
+    notes = "";
+    linkedTransactionId = "";
 }
 
 // Get transaction ID
@@ -64,10 +109,6 @@ string Transaction::getAccountNumber() const
 // Get related account number (for transfers)
 string Transaction::getRelatedAccountNumber() const
 {
-    if (relatedAccountNumber.empty())
-    {
-        return "N/A"; // Return "N/A" if not set
-    }
     return relatedAccountNumber;
 }
 
@@ -89,13 +130,15 @@ string Transaction::getTimestamp() const
     return timestamp;
 }
 
+// Get date part of the timestamp
+string Transaction::getDate() const
+{
+    return timestamp.substr(0, 10);
+}
+
 // Get description
 string Transaction::getDescription() const
 {
-    if (description.empty())
-    {
-        return "No description provided"; // Default message if empty
-    }
     return description;
 }
 
@@ -108,10 +151,6 @@ double Transaction::getBalanceBefore() const
 // Get balance after transaction
 double Transaction::getBalanceAfter() const
 {
-    if (balanceAfter == 0.0)
-    {
-        return balanceBefore + amount; // Default calculation if not set
-    }
     return balanceAfter;
 }
 
@@ -124,144 +163,136 @@ TransactionStatus Transaction::getStatus() const
 // Get customer ID
 string Transaction::getCustomerId() const
 {
-    if (customerId.empty())
-    {
-        return "N/A"; // Return "N/A" if not set
-    }
     return customerId;
 }
 
 // Get session ID
 string Transaction::getSessionId() const
 {
-    if (sessionId.empty())
-    {
-        return "N/A"; // Return "N/A" if not set
-    }
     return sessionId;
 }
 
 // Get notes
 string Transaction::getNotes() const
 {
-    if (notes.empty())
-    {
-        return "No notes provided"; // Default message if empty
-    }
     return notes;
+}
+
+// Get linked transaction ID
+string Transaction::getLinkedTransactionId() const
+{
+    return linkedTransactionId;
 }
 
 // Set transaction status
 void Transaction::setStatus(TransactionStatus newStatus)
 {
-    if (status != newStatus)
-    {
-        status = newStatus;
-        switch (newStatus)
-        {
-        case TransactionStatus::PENDING:
-            cout << "Transaction " << transactionId << " is now pending." << endl;
-            break;
-        case TransactionStatus::COMPLETED:
-            cout << "Transaction " << transactionId << " has been completed successfully." << endl;
-            break;
-        case TransactionStatus::FAILED:
-            cout << "Transaction " << transactionId << " has failed." << endl;
-            break;
-        default:
-            cout << "Transaction " << transactionId << " status updated." << endl;
-        }
-    }
+    status = newStatus;
 }
 
 // Set related account number
 void Transaction::setRelatedAccountNumber(string relatedAccNum)
 {
-    if (!relatedAccNum.empty())
-    {
-        relatedAccountNumber = relatedAccNum;
-    }
-    else
-    {
-        relatedAccountNumber = ""; // Reset if empty
-    }
+    relatedAccountNumber = (relatedAccNum == "N/A") ? "" : relatedAccNum;
 }
 
 // Set session ID
 void Transaction::setSessionId(string sessionId)
 {
-    if (!sessionId.empty())
-    {
-        this->sessionId = sessionId;
-    }
-    else
-    {
-        this->sessionId = ""; // Reset if empty
-    }
+    this->sessionId = sessionId;
 }
 
 // Set notes
 void Transaction::setNotes(string notes)
 {
-    if (!notes.empty())
-    {
-        this->notes = notes;
-    }
-    else
-    {
-        this->notes = ""; // Reset if empty
+    this->notes = notes;
+}
+
+// Set balance after transaction (may be negative for overdrawn checking accounts)
+void Transaction::setBalanceAfter(double balance)
+{
+    balanceAfter = roundMoney(balance);
+}
+
+// Set timestamp (used when loading saved transactions)
+void Transaction::setTimestamp(string newTimestamp)
+{
+    if (newTimestamp.size() >= 10) {
+        timestamp = newTimestamp;
     }
 }
 
-// Set balance after transaction
-void Transaction::setBalanceAfter(double balance)
+// Set linked transaction ID
+void Transaction::setLinkedTransactionId(string linkedId)
 {
-    if (balance >= 0)
+    linkedTransactionId = linkedId;
+}
+
+string Transaction::typeToString(TransactionType type)
+{
+    switch (type)
     {
-        balanceAfter = balance;
+    case TransactionType::DEPOSIT:           return "DEPOSIT";
+    case TransactionType::WITHDRAWAL:        return "WITHDRAWAL";
+    case TransactionType::TRANSFER_IN:       return "TRANSFER_IN";
+    case TransactionType::TRANSFER_OUT:      return "TRANSFER_OUT";
+    case TransactionType::FEE_CHARGE:        return "FEE_CHARGE";
+    case TransactionType::INTEREST_CREDIT:   return "INTEREST_CREDIT";
+    case TransactionType::ACCOUNT_OPENING:   return "ACCOUNT_OPENING";
+    case TransactionType::ACCOUNT_CLOSING:   return "ACCOUNT_CLOSING";
+    case TransactionType::LOAN_DISBURSEMENT: return "LOAN_DISBURSEMENT";
+    case TransactionType::LOAN_PAYMENT:      return "LOAN_PAYMENT";
+    default:                                 return "UNKNOWN";
     }
-    else
+}
+
+TransactionType Transaction::typeFromString(const string& name)
+{
+    static const TransactionType all[] = {
+        TransactionType::DEPOSIT, TransactionType::WITHDRAWAL, TransactionType::TRANSFER_IN,
+        TransactionType::TRANSFER_OUT, TransactionType::FEE_CHARGE, TransactionType::INTEREST_CREDIT,
+        TransactionType::ACCOUNT_OPENING, TransactionType::ACCOUNT_CLOSING,
+        TransactionType::LOAN_DISBURSEMENT, TransactionType::LOAN_PAYMENT};
+    string upper = toUpper(trim(name));
+    for (TransactionType type : all) {
+        if (typeToString(type) == upper) return type;
+    }
+    return TransactionType::UNKNOWN;
+}
+
+string Transaction::statusToString(TransactionStatus status)
+{
+    switch (status)
     {
-        cout << "Invalid balance after transaction. Must be non-negative." << endl;
+    case TransactionStatus::PENDING:   return "PENDING";
+    case TransactionStatus::COMPLETED: return "COMPLETED";
+    case TransactionStatus::FAILED:    return "FAILED";
+    case TransactionStatus::CANCELLED: return "CANCELLED";
+    case TransactionStatus::REVERSED:  return "REVERSED";
+    default:                           return "UNKNOWN";
     }
+}
+
+TransactionStatus Transaction::statusFromString(const string& name)
+{
+    string upper = toUpper(trim(name));
+    if (upper == "COMPLETED") return TransactionStatus::COMPLETED;
+    if (upper == "FAILED") return TransactionStatus::FAILED;
+    if (upper == "CANCELLED") return TransactionStatus::CANCELLED;
+    if (upper == "REVERSED") return TransactionStatus::REVERSED;
+    return TransactionStatus::PENDING;
 }
 
 // Get transaction type as string
 string Transaction::getTransactionTypeString() const
 {
-    switch (transactionType)
-    {
-    case TransactionType::DEPOSIT:
-        return "DEPOSIT";
-    case TransactionType::WITHDRAWAL:
-        return "WITHDRAWAL";
-    case TransactionType::TRANSFER_IN:
-        return "TRANSFER_IN";
-    case TransactionType::TRANSFER_OUT:
-        return "TRANSFER_OUT";
-    case TransactionType::FEE_CHARGE:
-        return "FEE_CHARGE";
-    case TransactionType::INTEREST_CREDIT:
-        return "INTEREST_CREDIT";
-    default:
-        return "UNKNOWN";
-    }
+    return typeToString(transactionType);
 }
 
 // Get status as string
 string Transaction::getStatusString() const
 {
-    switch (status)
-    {
-    case TransactionStatus::PENDING:
-        return "PENDING";
-    case TransactionStatus::COMPLETED:
-        return "COMPLETED";
-    case TransactionStatus::FAILED:
-        return "FAILED";
-    default:
-        return "UNKNOWN";
-    }
+    return statusToString(status);
 }
 
 // Check if transaction was successful
@@ -276,64 +307,75 @@ bool Transaction::isTransfer() const
     return transactionType == TransactionType::TRANSFER_IN || transactionType == TransactionType::TRANSFER_OUT;
 }
 
-// Get net amount (positive for credits, negative for debits)
-double Transaction::getNetAmount() const
+// Check if the transaction puts money into the account
+bool Transaction::isCredit() const
 {
     switch (transactionType)
     {
     case TransactionType::DEPOSIT:
     case TransactionType::TRANSFER_IN:
     case TransactionType::INTEREST_CREDIT:
-        return amount; // Positive for credits
-    case TransactionType::WITHDRAWAL:
-    case TransactionType::TRANSFER_OUT:
-    case TransactionType::FEE_CHARGE:
-        return -amount; // Negative for debits
+    case TransactionType::ACCOUNT_OPENING:
+    case TransactionType::LOAN_DISBURSEMENT:
+        return true;
     default:
-        return 0.0; // Unknown type, no net amount
+        return false;
     }
+}
+
+// Completed transactions moved money; reversed ones did too, and are offset by a compensating entry
+bool Transaction::affectsBalance() const
+{
+    return status == TransactionStatus::COMPLETED || status == TransactionStatus::REVERSED;
+}
+
+// Get net amount (positive for credits, negative for debits)
+double Transaction::getNetAmount() const
+{
+    if (transactionType == TransactionType::UNKNOWN) {
+        return 0.0;
+    }
+    return isCredit() ? amount : -amount;
 }
 
 // Display detailed transaction information
 void Transaction::displayTransaction() const
 {
-    cout << "Transaction ID: " << transactionId << endl;
-    cout << "Account Number: " << accountNumber << endl;
-    cout << "Related Account: " << (relatedAccountNumber.empty() ? "N/A" : relatedAccountNumber) << endl;
-    cout << "Type: " << getTransactionTypeString() << endl;
-    cout << "Amount: " << fixed << setprecision(2) << amount << endl;
-    cout << "Timestamp: " << timestamp << endl;
-    cout << "Description: " << (description.empty() ? "No description provided" : description) << endl;
-    cout << "Balance Before: " << fixed << setprecision(2) << balanceBefore << endl;
-    cout << "Balance After: " << fixed << setprecision(2) << balanceAfter << endl;
-    cout << "Status: " << getStatusString() << endl;
-    cout << "Customer ID: " << (customerId.empty() ? "N/A" : customerId) << endl;
-    cout << "Session ID: " << (sessionId.empty() ? "N/A" : sessionId) << endl;
-    cout << "Notes: " << (notes.empty() ? "No notes provided" : notes) << endl;
-    cout << "----------------------------------------" << endl;
-    cout << "Net Amount: " << fixed << setprecision(2) << getNetAmount() << endl;
-    cout << "Successful: " << (isSuccessful() ? "Yes" : "No") << endl;
-    cout << "Is Transfer: " << (isTransfer() ? "Yes" : "No") << endl;
-    cout << "----------------------------------------" << endl;
-    cout << "End of Transaction Details" << endl;
-    cout << "----------------------------------------" << endl;
+    cout << "Transaction ID   : " << transactionId << endl;
+    cout << "Account Number   : " << accountNumber << endl;
+    cout << "Related Account  : " << (relatedAccountNumber.empty() ? "N/A" : relatedAccountNumber) << endl;
+    cout << "Type             : " << getTransactionTypeString() << endl;
+    cout << "Amount           : " << formatCurrency(amount) << endl;
+    cout << "Timestamp        : " << timestamp << endl;
+    cout << "Description      : " << (description.empty() ? "-" : description) << endl;
+    cout << "Balance Before   : " << formatCurrency(balanceBefore) << endl;
+    cout << "Balance After    : " << formatCurrency(balanceAfter) << endl;
+    cout << "Status           : " << getStatusString() << endl;
+    cout << "Customer ID      : " << (customerId.empty() ? "N/A" : customerId) << endl;
+    cout << "Session ID       : " << (sessionId.empty() ? "N/A" : sessionId) << endl;
+    cout << "Linked Txn       : " << (linkedTransactionId.empty() ? "N/A" : linkedTransactionId) << endl;
+    cout << "Notes            : " << (notes.empty() ? "-" : notes) << endl;
 }
 
 // Display transaction summary (one line)
 void Transaction::displayTransactionSummary() const
 {
-    cout << "ID: " << transactionId
-         << " | Type: " << getTransactionTypeString()
-         << " | Amount: " << fixed << setprecision(2) << amount
-         << " | Status: " << getStatusString()
-         << " | Date: " << timestamp
+    cout << transactionId
+         << " | " << timestamp
+         << " | " << left << setw(17) << getTransactionTypeString()
+         << " | " << right << setw(12) << formatCurrency(getNetAmount())
+         << " | " << getStatusString()
+         << " | " << description
          << endl;
 }
 
-// Comparison operator for sorting
+// Comparison operator for sorting (chronological)
 bool Transaction::operator<(const Transaction &other) const
 {
-    return timestamp < other.timestamp;
+    if (timestamp != other.timestamp) {
+        return timestamp < other.timestamp;
+    }
+    return transactionSequence(transactionId) < transactionSequence(other.transactionId);
 }
 
 // Equality operator
@@ -346,785 +388,502 @@ bool Transaction::operator==(const Transaction &other) const
 // TRANSACTION MANAGER CLASS IMPLEMENTATIONS
 // =============================================================================
 
-// Constructor
+// Constructor (data is loaded explicitly via loadTransactionHistory)
 TransactionManager::TransactionManager(string logFile)
 {
     logFilePath = logFile;
-    // Initialize empty maps and multimaps
-    transactionHistory.clear();
-    accountTransactions.clear();
-    customerTransactions.clear();
-    dateTransactions.clear();
-    nextTransactionNumber = 1; // Start with transaction number 1
-    if (!loadTransactionHistory())
-    {
-        cout << "No existing transaction history found. Starting fresh." << endl;
-    }
-    else
-    {
-        cout << "Transaction history loaded successfully." << endl;
-        cout << "Transaction Manager initialized with log file: " << logFilePath << endl;
-    }
-    cout << "Next transaction number: " << nextTransactionNumber << endl;
-    cout << "----------------------------------------" << endl;
+    nextTransactionNumber = 1;
+    currentSessionId = "";
 }
 
-// Destructor
-TransactionManager::~TransactionManager()
+void TransactionManager::setSessionContext(string sessionId)
 {
-    if (!saveTransactionHistory())
-    {
-        cout << "Failed to save transaction history on exit." << endl;
+    currentSessionId = sessionId;
+}
+
+string TransactionManager::getSessionContext() const
+{
+    return currentSessionId;
+}
+
+// Add a transaction to every lookup index
+void TransactionManager::indexTransaction(const Transaction &transaction)
+{
+    const string &transactionId = transaction.getTransactionId();
+    accountTransactions.emplace(transaction.getAccountNumber(), transactionId);
+    if (!transaction.getCustomerId().empty()) {
+        customerTransactions.emplace(transaction.getCustomerId(), transactionId);
     }
-    else
-    {
-        cout << "Transaction history saved successfully on exit." << endl;
+    dateTransactions.emplace(transaction.getDate(), transactionId);
+}
+
+// Keep the ID counter ahead of every ID we have seen
+void TransactionManager::updateNextTransactionNumber(const string &transactionId)
+{
+    long long sequence = transactionSequence(transactionId);
+    if (sequence >= nextTransactionNumber) {
+        nextTransactionNumber = sequence + 1;
     }
-    cout << "Transaction Manager destroyed." << endl;
+}
+
+// Inclusive date filter on the YYYY-MM-DD part; empty bounds are open
+bool TransactionManager::inDateRange(const Transaction &txn, const string &startDate, const string &endDate)
+{
+    string date = txn.getDate();
+    if (!startDate.empty() && date < startDate) return false;
+    if (!endDate.empty() && date > endDate) return false;
+    return true;
+}
+
+// Generic transaction recorder used by every process* function
+string TransactionManager::processTransaction(TransactionType type, string accountNumber, double amount,
+                                              string description, double balanceBefore, double balanceAfter,
+                                              string customerId, string relatedAccount)
+{
+    string transactionId = generateTransactionId();
+    Transaction transaction(transactionId, accountNumber, type, amount,
+                            description, balanceBefore, balanceAfter, customerId);
+    transaction.setRelatedAccountNumber(relatedAccount);
+    transaction.setSessionId(currentSessionId);
+    transaction.setStatus(TransactionStatus::COMPLETED);
+    return addTransaction(transaction) ? transactionId : "";
 }
 
 // Process deposit transaction
-string TransactionManager::processDeposit(string accountNumber, double amount, string description,double balanceBefore, double balanceAfter, string customerId)
+string TransactionManager::processDeposit(string accountNumber, double amount, string description,
+                                          double balanceBefore, double balanceAfter, string customerId)
 {
-    string transactionId = generateTransactionId();
-    Transaction transaction(transactionId, accountNumber, TransactionType::DEPOSIT, amount,
-                            description, balanceBefore, balanceAfter, customerId);
-    transaction.setStatus(TransactionStatus::COMPLETED); // Set status to completed
-    if (addTransaction(transaction))
-    {
-        cout << "Deposit transaction processed successfully: " << transactionId << endl;
-        return transactionId; // Return the transaction ID
-    }
-    else
-    {
-        cout << "Failed to process deposit transaction." << endl;
-        return ""; // Return empty string on failure
-    }
+    return processTransaction(TransactionType::DEPOSIT, accountNumber, amount, description,
+                              balanceBefore, balanceAfter, customerId);
 }
 
 // Process withdrawal transaction
 string TransactionManager::processWithdrawal(string accountNumber, double amount, string description,
                                              double balanceBefore, double balanceAfter, string customerId)
 {
-    string transactionId = generateTransactionId();
-    Transaction transaction(transactionId, accountNumber, TransactionType::WITHDRAWAL, amount,
-                            description, balanceBefore, balanceAfter, customerId);
-    transaction.setStatus(TransactionStatus::COMPLETED); // Set status to completed
-    if (addTransaction(transaction))
-    {
-        cout << "Withdrawal transaction processed successfully: " << transactionId << endl;
-        return transactionId; // Return the transaction ID
-    }
-    else
-    {
-        cout << "Failed to process withdrawal transaction." << endl;
-        return ""; // Return empty string on failure
-    }
+    return processTransaction(TransactionType::WITHDRAWAL, accountNumber, amount, description,
+                              balanceBefore, balanceAfter, customerId);
 }
 
-// Process transfer transaction
+// Process transfer: records a TRANSFER_OUT and a linked TRANSFER_IN; returns the OUT id
 string TransactionManager::processTransfer(string fromAccount, string toAccount, double amount,
                                            string description, double fromBalBefore, double fromBalAfter,
-                                           double toBalBefore, double toBalAfter, string customerId)
+                                           double toBalBefore, double toBalAfter, string fromCustomerId,
+                                           string toCustomerId)
 {
-    string transferOutId = generateTransactionId();
-    Transaction transferOut(transferOutId, fromAccount, TransactionType::TRANSFER_OUT, amount,
-                            description, fromBalBefore, fromBalAfter, customerId);
-    transferOut.setRelatedAccountNumber(toAccount);
-    transferOut.setStatus(TransactionStatus::COMPLETED); // Set status to completed
-    if (!addTransaction(transferOut))
-    {
-        cout << "Failed to process transfer OUT transaction." << endl;
-        return ""; // Return empty string on failure
+    if (toCustomerId.empty()) {
+        toCustomerId = fromCustomerId;
     }
-    cout << "Transfer OUT transaction processed successfully: " << transferOutId << endl;
-    // Now create the transfer IN transaction
-    string transferInId = generateTransactionId();
-    Transaction transferIn(transferInId, toAccount, TransactionType::TRANSFER_IN, amount,
-                           description, toBalBefore, toBalAfter, customerId);
-    transferIn.setRelatedAccountNumber(fromAccount);
-    transferIn.setStatus(TransactionStatus::COMPLETED); // Set status to completed
-    if (!addTransaction(transferIn))
-    {
-        cout << "Failed to process transfer IN transaction." << endl;
-        // Rollback the transfer OUT transaction
+    string transferOutId = processTransaction(TransactionType::TRANSFER_OUT, fromAccount, amount, description,
+                                              fromBalBefore, fromBalAfter, fromCustomerId, toAccount);
+    if (transferOutId.empty()) {
+        return "";
+    }
+    string transferInId = processTransaction(TransactionType::TRANSFER_IN, toAccount, amount, description,
+                                             toBalBefore, toBalAfter, toCustomerId, fromAccount);
+    if (transferInId.empty()) {
         updateTransactionStatus(transferOutId, TransactionStatus::FAILED);
-        cout << "Transfer OUT transaction rolled back due to failure in transfer IN." << endl;
-        return ""; // Return empty string on failure
+        return "";
     }
-    cout << "Transfer IN transaction processed successfully: " << transferInId << endl;
-    return transferOutId; // Return the transfer OUT transaction ID
-}
-// Update transaction status
-bool TransactionManager::updateTransactionStatus(string transactionId, TransactionStatus newStatus)
-{
-    auto it = transactionHistory.find(transactionId);
-    if (it != transactionHistory.end())
-    {
-        Transaction &transaction = it->second;
-        TransactionStatus oldStatus = transaction.getStatus();
-        transaction.setStatus(newStatus);
-        cout << "Transaction " << transactionId << " status changed from "
-             << static_cast<int>(oldStatus) << " to " << static_cast<int>(newStatus)
-             << " at " << getCurrentDateTime() << endl;
-        // Log the status change
-        ofstream logFile(logFilePath, ios::app);
-        if (logFile.is_open())
-        {
-            logFile << "Transaction " << transactionId << " status changed from "
-                    << static_cast<int>(oldStatus) << " to " << static_cast<int>(newStatus)
-                    << " at " << getCurrentDateTime() << endl;
-            logFile.close();
-        }
-        else
-        {
-            cout << "Failed to open log file for writing." << endl;
-        }
-        // Update the transaction in the history
-        transactionHistory[transactionId] = transaction;
-        // Update the status in the accountTransactions, customerTransactions, and dateTransactions maps
-        auto range = accountTransactions.equal_range(transaction.getAccountNumber());
-        for (auto it = range.first; it != range.second; ++it)
-        {
-            if (it->second == transactionId)
-            {
-                accountTransactions.erase(it);
-                accountTransactions.emplace(transaction.getAccountNumber(), transactionId);
-                break; // Exit loop after updating
-            }
-        }
-        range = customerTransactions.equal_range(transaction.getCustomerId());
-        for (auto it = range.first; it != range.second; ++it)
-        {
-            if (it->second == transactionId)
-            {
-                customerTransactions.erase(it);
-                customerTransactions.emplace(transaction.getCustomerId(), transactionId);
-                break; // Exit loop after updating
-            }
-        }
-        range = dateTransactions.equal_range(transaction.getTimestamp().substr(0, 10)); // Use date part
-        for (auto it = range.first; it != range.second; ++it)
-        {
-            if (it->second == transactionId)
-            {
-                dateTransactions.erase(it);
-                dateTransactions.emplace(transaction.getTimestamp().substr(0, 10), transactionId);
-                break; // Exit loop after updating
-            }
-        }
-        cout << "Transaction status updated successfully." << endl;
-        return true; // Successfully updated status
-    }
-    else
-    {
-        cout << "Transaction with ID " << transactionId << " not found." << endl;
-        return false; // Transaction not found
-    }
-    cout << "Transaction status update failed." << endl;
-    return false; // Failed to update status
+    linkTransactions(transferOutId, transferInId);
+    return transferOutId;
 }
 
-// Reverse a transaction
-bool TransactionManager::reverseTransaction(string transactionId, string reason)
-{
-    auto it = transactionHistory.find(transactionId);
-    if (it != transactionHistory.end())
-    {
-        Transaction &originalTransaction = it->second;
-        if (originalTransaction.getStatus() != TransactionStatus::COMPLETED)
-        {
-            cout << "Transaction " << transactionId << " cannot be reversed. Current status: "
-                 << originalTransaction.getStatusString() << endl;
-            return false; // Cannot reverse non-completed transactions
-        }
-        // Set original transaction status to REVERSED
-        originalTransaction.setStatus(TransactionStatus::REVERSED);
-        originalTransaction.setNotes("Reversed: " + reason);
-        cout << "Transaction " << transactionId << " has been reversed." << endl;
-        // Determine reversal type based on original transaction type
-        TransactionType reversalType;
-        if (originalTransaction.getTransactionType() == TransactionType::DEPOSIT)
-        {
-            reversalType = TransactionType::WITHDRAWAL; // Reversal for deposit is a withdrawal
-        }
-        else if (originalTransaction.getTransactionType() == TransactionType::WITHDRAWAL)
-        {
-            reversalType = TransactionType::DEPOSIT; // Reversal for withdrawal is a deposit
-        }
-        else if (originalTransaction.isTransfer())
-        {
-            // For transfers, create a new transfer transaction with opposite direction
-            string relatedAccount = originalTransaction.getRelatedAccountNumber();
-            string fromAccount = originalTransaction.getAccountNumber();
-            string toAccount = relatedAccount;
-            double amount = originalTransaction.getAmount();
-            string description = "Reversal of transfer " + originalTransaction.getTransactionId();
-            double fromBalBefore = originalTransaction.getBalanceBefore();
-            double fromBalAfter = fromBalBefore + amount; // Reversal adds back the amount
-            double toBalBefore = originalTransaction.getBalanceAfter();
-            double toBalAfter = toBalBefore - amount; // Reversal deducts the amount
-            return (processTransfer(fromAccount, toAccount, amount, description,
-                                    fromBalBefore, fromBalAfter, toBalBefore, toBalAfter,
-                                    originalTransaction.getCustomerId()) == "");
-        }
-        else
-        {
-            cout << "Reversal not implemented for transaction type: "
-                 << originalTransaction.getTransactionTypeString() << endl;
-            return false; // Reversal not implemented for this type
-        }
-        // Create reversal transaction
-        string reversalId = generateTransactionId();
-        Transaction reversalTransaction(reversalId, originalTransaction.getAccountNumber(),
-                                        reversalType, originalTransaction.getAmount(),
-                                        "Reversal of " + originalTransaction.getTransactionId(),
-                                        originalTransaction.getBalanceBefore(),
-                                        originalTransaction.getBalanceAfter(),
-                                        originalTransaction.getCustomerId());
-        reversalTransaction.setRelatedAccountNumber(originalTransaction.getRelatedAccountNumber());
-        reversalTransaction.setStatus(TransactionStatus::COMPLETED); // Set status to completed
-        if (addTransaction(reversalTransaction))
-        {
-            cout << "Reversal transaction created successfully: " << reversalId << endl;
-            return true; // Successfully created reversal transaction
-        }
-        else
-        {
-            cout << "Failed to create reversal transaction." << endl;
-            return false; // Failed to add reversal transaction
-        }
-    }
-    else
-    {
-        cout << "Transaction with ID " << transactionId << " not found." << endl;
-        return false; // Transaction not found
-    }
-}
-
-// Add transaction to system
-bool TransactionManager::addTransaction(Transaction transaction)
-{
-    string transactionId = transaction.getTransactionId();
-    if (transactionHistory.find(transactionId) != transactionHistory.end())
-    {
-        cout << "Transaction with ID " << transactionId << " already exists." << endl;
-        return false; // Transaction already exists
-    }
-    // Add to transaction history
-    transactionHistory[transactionId] = transaction;
-    // Add to account transactions
-    accountTransactions.emplace(transaction.getAccountNumber(), transactionId);
-    // Add to customer transactions
-    transaction.setSessionId(""); // Reset session ID if not set
-    customerTransactions.emplace(transaction.getCustomerId(), transactionId);
-    // Add to date transactions
-    string date = transaction.getTimestamp().substr(0, 10); // Use date part
-    dateTransactions.emplace(date, transactionId);
-    // Update next transaction number if necessary
-    size_t lastDash = transactionId.find_last_of('-');
-    if (lastDash != string::npos && lastDash + 1 < transactionId.length())
-    {
-        string numericPart = transactionId.substr(lastDash + 1);
-        int txnNumber = stoi(numericPart);
-        if (nextTransactionNumber <= txnNumber)
-        {
-            nextTransactionNumber = txnNumber + 1;
-        }
-    }
-    cout << "Transaction " << transactionId << " added successfully." << endl;
-    return true; // Successfully added
-}
-
-// Find transaction by ID
-Transaction *TransactionManager::findTransaction(string transactionId)
-{
-    auto it = transactionHistory.find(transactionId);
-    if (it != transactionHistory.end())
-    {
-        return &it->second; // Return pointer to the found transaction
-    }
-    else
-    {
-        cout << "Transaction with ID " << transactionId << " not found." << endl;
-        return nullptr; // Transaction not found
-    }
-}
-
-// Get account transaction history
-vector<Transaction> TransactionManager::getAccountHistory(string accountNumber, int limit) const
-{
-    vector<Transaction> history;
-    auto range = accountTransactions.equal_range(accountNumber);
-    for (auto it = range.first; it != range.second && history.size() < static_cast<size_t>(limit); ++it)
-    {
-        const string &transactionId = it->second;
-        auto txnIt = transactionHistory.find(transactionId);
-        if (txnIt != transactionHistory.end())
-        {
-            history.push_back(txnIt->second); // Add transaction to history
-        }
-    }
-    // Sort history by timestamp (newest first)
-    sort(history.begin(), history.end(), [](const Transaction &a, const Transaction &b)
-         {
-             return a.getTimestamp() > b.getTimestamp(); // Newest first
-         });
-    cout << "Retrieved " << history.size() << " transactions for account " << accountNumber << "." << endl;
-    return history; // Return the transaction history
-}
-
-// Get customer transaction history
-vector<Transaction> TransactionManager::getCustomerHistory(string customerId, int limit) const
-{
-    vector<Transaction> history;
-    auto range = customerTransactions.equal_range(customerId);
-    for (auto it = range.first; it != range.second && history.size() < static_cast<size_t>(limit); ++it)
-    {
-        const string &transactionId = it->second;
-        auto txnIt = transactionHistory.find(transactionId);
-        if (txnIt != transactionHistory.end())
-        {
-            history.push_back(txnIt->second); // Add transaction to history
-        }
-    }
-    // Sort history by timestamp (newest first)
-    sort(history.begin(), history.end(), [](const Transaction &a, const Transaction &b)
-         {
-             return a.getTimestamp() > b.getTimestamp(); // Newest first
-         });
-    cout << "Retrieved " << history.size() << " transactions for customer " << customerId << "." << endl;
-    return history; // Return the transaction history
-}
-
-// Get transactions by type
-vector<Transaction> TransactionManager::getTransactionsByType(TransactionType type, int limit) const
-{
-    vector<Transaction> transactions;
-    for (const auto &pair : transactionHistory)
-    {
-        const Transaction &txn = pair.second;
-        if (txn.getTransactionType() == type)
-        {
-            transactions.push_back(txn);
-            if (transactions.size() >= static_cast<size_t>(limit))
-            {
-                break; // Limit reached
-            }
-        }
-    }
-    // Sort transactions by timestamp (newest first)
-    sort(transactions.begin(), transactions.end(), [](const Transaction &a, const Transaction &b)
-         {
-             return a.getTimestamp() > b.getTimestamp(); // Newest first
-         });
-    cout << "Retrieved " << transactions.size() << " transactions of type "
-         << static_cast<int>(type) << "." << endl;
-    return transactions; // Return the filtered transactions
-}
-
-// Display transaction history for account
-void TransactionManager::displayTransactionHistory(string accountNumber, int limit) const
-{
-    vector<Transaction> history = getAccountHistory(accountNumber, limit);
-    cout << "Transaction History for Account: " << accountNumber << endl;
-    cout << "--------------------------------------------------------" << endl;
-    cout << left << setw(15) << "Transaction ID"
-         << setw(15) << "Type"
-         << setw(10) << "Amount"
-         << setw(20) << "Timestamp"
-         << setw(20) << "Status"
-         << setw(20) << "Description" << endl;
-    cout << "--------------------------------------------------------" << endl;
-    for (const Transaction &txn : history)
-    {
-        cout << left << setw(15) << txn.getTransactionId()
-             << setw(15) << txn.getTransactionTypeString()
-             << setw(10) << fixed << setprecision(2) << txn.getAmount()
-             << setw(20) << txn.getTimestamp()
-             << setw(20) << txn.getStatusString()
-             << setw(20) << txn.getDescription() << endl;
-    }
-    cout << "--------------------------------------------------------" << endl;
-    cout << "Total Transactions: " << history.size() << endl;
-    double netFlow = 0.0;
-    for (const Transaction &txn : history)
-    {
-        netFlow += txn.getNetAmount(); // Calculate net flow
-    }
-    cout << "Net Flow: " << fixed << setprecision(2) << netFlow << endl;
-    cout << "--------------------------------------------------------" << endl;
-}
-
-// Get total deposits for account
-double TransactionManager::getTotalDeposits(string accountNumber, string startDate, string endDate) const
-{
-    double totalDeposits = 0.0;
-    vector<Transaction> history = getAccountHistory(accountNumber, INT_MAX); // Get all transactions
-    for (const Transaction &txn : history)
-    {
-        if (txn.getTransactionType() == TransactionType::DEPOSIT)
-        {
-            if (startDate.empty() || endDate.empty() ||
-                (txn.getTimestamp() >= startDate && txn.getTimestamp() <= endDate))
-            {
-                totalDeposits += txn.getAmount(); // Add to total deposits
-            }
-        }
-    }
-    cout << "Total deposits for account " << accountNumber << ": "
-         << fixed << setprecision(2) << totalDeposits << endl;
-    return totalDeposits; // Return total deposits
-}
-
-// Generate unique transaction ID
-string TransactionManager::generateTransactionId()
-{
-    string dateStr = getCurrentDate();
-    dateStr.erase(remove(dateStr.begin(), dateStr.end(), '-'), dateStr.end());
-
-    stringstream ss;
-    ss << "TXN" << dateStr << setfill('0') << setw(3) << nextTransactionNumber++;
-    return ss.str();
-}
-
-// Save transaction history to file
-bool TransactionManager::saveTransactionHistory() const
-{
-    ofstream file(logFilePath);
-    if (!file.is_open())
-    {
-        cout << "Failed to open transaction history file for writing: " << logFilePath << endl;
-        return false; // File could not be opened
-    }
-    file << transactionHistory.size() << endl; // Write number of transactions
-    for (const auto &pair : transactionHistory)
-    {
-        const Transaction &txn = pair.second;
-        file << txn.getTransactionId() << " "
-             << txn.getAccountNumber() << " "
-             << txn.getRelatedAccountNumber() << " "
-             << static_cast<int>(txn.getTransactionType()) << " "
-             << fixed << setprecision(2) << txn.getAmount() << " "
-             << fixed << setprecision(2) << txn.getBalanceBefore() << " "
-             << fixed << setprecision(2) << txn.getBalanceAfter() << " "
-             << txn.getTimestamp() << " "
-             << txn.getDescription() << " "
-             << static_cast<int>(txn.getStatus()) << " "
-             << txn.getCustomerId() << " "
-             << txn.getSessionId() << " "
-             << txn.getNotes() << endl;
-    }
-    file.close();
-    cout << "Transaction history saved successfully to: " << logFilePath << endl;
-    return true;
-}
-
-// Load transaction history from file
-bool TransactionManager::loadTransactionHistory()
-{
-    ifstream file(logFilePath);
-    if (!file.is_open())
-    {
-        cout << "Transaction history file not found: " << logFilePath << endl;
-        return false; // File does not exist
-    }
-    cout << "Loading transaction history from: " << logFilePath << endl;
-    int transactionCount;
-    file >> transactionCount;
-    file.ignore(); // Ignore newline after count
-    for (int i = 0; i < transactionCount; ++i)
-    {
-        Transaction transaction;
-        string line;
-        getline(file, line);
-        istringstream iss(line);
-        string txnId, accNum, relatedAccNum, typeStr, desc, timestamp,
-            statusStr, custId, sessionId, notes;
-        double amount, beforeBal, afterBal;
-        int typeInt = 0, statusInt = 0;
-        iss >> txnId >> accNum >> relatedAccNum >> typeInt >> amount >> beforeBal >> afterBal >> timestamp >> desc >> statusStr >> custId >> sessionId >> notes;
-        transaction = Transaction(txnId, accNum, static_cast<TransactionType>(typeInt),
-                                  amount, desc, beforeBal, afterBal, custId);
-        transaction.setRelatedAccountNumber(relatedAccNum);
-        transaction.setSessionId(sessionId);
-        transaction.setNotes(notes);
-        transaction.setStatus(static_cast<TransactionStatus>(statusInt));
-        // Add to transaction history
-        transactionHistory[txnId] = transaction;
-        // Add to account transactions
-        accountTransactions.emplace(accNum, txnId);
-        // Add to customer transactions
-        customerTransactions.emplace(custId, txnId);
-        // Add to date transactions
-        dateTransactions.emplace(timestamp.substr(0, 10), txnId); // Use date part
-        // Update next transaction number
-        size_t lastDash = txnId.find_last_of('-');
-        if (lastDash != string::npos && lastDash + 1 < txnId.length())
-        {
-            string numericPart = txnId.substr(lastDash + 1);
-            int txnNumber = stoi(numericPart);
-            if (nextTransactionNumber <= txnNumber)
-            {
-                nextTransactionNumber = txnNumber + 1;
-            }
-        }
-    }
-    file.close();
-    cout << "Loaded " << transactionCount << " transactions." << endl;
-    return true; // Successfully loaded
-}
-
-// Display transaction statistics
-void TransactionManager::displayTransactionStatistics() const
-{
-    cout << "Transaction Statistics:" << endl;
-    cout << "----------------------------------------" << endl;
-    cout << "Total Transactions: " << transactionHistory.size() << endl;
-    double totalVolume = 0.0;
-    int successfulCount = 0;
-    int failedCount = 0;
-    for (const auto &pair : transactionHistory)
-    {
-        const Transaction &txn = pair.second;
-        totalVolume += txn.getNetAmount(); // Sum net amounts
-        if (txn.getStatus() == TransactionStatus::COMPLETED)
-        {
-            successfulCount++;
-        }
-        else if (txn.getStatus() == TransactionStatus::FAILED)
-        {
-            failedCount++;
-        }
-    }
-    cout << "Total Volume: " << fixed << setprecision(2) << totalVolume << endl;
-    cout << "Successful Transactions: " << successfulCount << endl;
-    cout << "Failed Transactions: " << failedCount << endl;
-    cout << "----------------------------------------" << endl;
-    cout << "Transaction Types Breakdown:" << endl;
-    map<TransactionType, int> typeCount;
-    for (const auto &pair : transactionHistory)
-    {
-        const Transaction &txn = pair.second;
-        typeCount[txn.getTransactionType()]++; // Count each type
-    }
-    for (const auto &pair : typeCount)
-    {
-        cout << "Type: " << static_cast<int>(pair.first)
-             << ", Count: " << pair.second << endl;
-    }
-    cout << "----------------------------------------" << endl;
-    cout << "End of Transaction Statistics" << endl;
-    cout << "----------------------------------------" << endl;
-}
 // Process fee charge transaction
 string TransactionManager::processFeeCharge(string accountNumber, double amount, string description,
                                             double balanceBefore, double balanceAfter, string customerId)
 {
-    string transactionId = generateTransactionId();
-    Transaction transaction(transactionId, accountNumber, TransactionType::FEE_CHARGE, amount,
-                            description, balanceBefore, balanceAfter, customerId);
-    transaction.setStatus(TransactionStatus::COMPLETED); // Set status to completed
-    if (addTransaction(transaction))
-    {
-        cout << "Fee charge transaction processed successfully: " << transactionId << endl;
-        return transactionId; // Return the transaction ID
-    }
-    else
-    {
-        cout << "Failed to process fee charge transaction." << endl;
-        return ""; // Return empty string on failure
-    }
+    return processTransaction(TransactionType::FEE_CHARGE, accountNumber, amount, description,
+                              balanceBefore, balanceAfter, customerId);
 }
 
 // Process interest credit transaction
 string TransactionManager::processInterestCredit(string accountNumber, double amount, string description,
                                                  double balanceBefore, double balanceAfter, string customerId)
 {
-    string transactionId = generateTransactionId();
-    Transaction transaction(transactionId, accountNumber, TransactionType::INTEREST_CREDIT, amount,
-                            description, balanceBefore, balanceAfter, customerId);
-    transaction.setStatus(TransactionStatus::COMPLETED); // Set status to completed
-    if (addTransaction(transaction))
-    {
-        cout << "Interest credit transaction processed successfully: " << transactionId << endl;
-        return transactionId; // Return the transaction ID
-    }
-    else
-    {
-        cout << "Failed to process interest credit transaction." << endl;
-        return ""; // Return empty string on failure
-    }
+    return processTransaction(TransactionType::INTEREST_CREDIT, accountNumber, amount, description,
+                              balanceBefore, balanceAfter, customerId);
 }
 
-// Get transactions by date range
+// Add transaction to system
+bool TransactionManager::addTransaction(Transaction transaction)
+{
+    const string transactionId = transaction.getTransactionId();
+    if (transactionId.empty() || transactionHistory.count(transactionId) > 0)
+    {
+        return false; // Missing or duplicate ID
+    }
+    transactionHistory[transactionId] = transaction;
+    indexTransaction(transaction);
+    updateNextTransactionNumber(transactionId);
+    return true;
+}
+
+// Find transaction by ID
+Transaction *TransactionManager::findTransaction(string transactionId)
+{
+    auto it = transactionHistory.find(transactionId);
+    return it != transactionHistory.end() ? &it->second : nullptr;
+}
+
+const Transaction *TransactionManager::findTransaction(string transactionId) const
+{
+    auto it = transactionHistory.find(transactionId);
+    return it != transactionHistory.end() ? &it->second : nullptr;
+}
+
+// Update transaction status (indexes do not depend on status, so nothing else changes)
+bool TransactionManager::updateTransactionStatus(string transactionId, TransactionStatus newStatus)
+{
+    Transaction *transaction = findTransaction(transactionId);
+    if (!transaction)
+    {
+        return false;
+    }
+    transaction->setStatus(newStatus);
+    return true;
+}
+
+// Mark a completed transaction as reversed. The Bank creates the compensating
+// entry and adjusts balances, because only it can see the accounts.
+bool TransactionManager::reverseTransaction(string transactionId, string reason)
+{
+    Transaction *transaction = findTransaction(transactionId);
+    if (!transaction || transaction->getStatus() != TransactionStatus::COMPLETED)
+    {
+        return false;
+    }
+    transaction->setStatus(TransactionStatus::REVERSED);
+    transaction->setNotes("Reversed: " + reason);
+    return true;
+}
+
+// Link two transactions to each other (transfer legs, reversal pairs)
+bool TransactionManager::linkTransactions(string firstId, string secondId)
+{
+    Transaction *first = findTransaction(firstId);
+    Transaction *second = findTransaction(secondId);
+    if (!first || !second)
+    {
+        return false;
+    }
+    first->setLinkedTransactionId(secondId);
+    second->setLinkedTransactionId(firstId);
+    return true;
+}
+
+// Get every transaction (newest first)
+vector<Transaction> TransactionManager::getAllTransactions() const
+{
+    vector<Transaction> all;
+    all.reserve(transactionHistory.size());
+    for (const auto &pair : transactionHistory)
+    {
+        all.push_back(pair.second);
+    }
+    sort(all.begin(), all.end(), newestFirst);
+    return all;
+}
+
+// Get account transaction history (newest first, at most limit entries)
+vector<Transaction> TransactionManager::getAccountHistory(string accountNumber, int limit) const
+{
+    vector<Transaction> history;
+    auto range = accountTransactions.equal_range(accountNumber);
+    for (auto it = range.first; it != range.second; ++it)
+    {
+        auto txnIt = transactionHistory.find(it->second);
+        if (txnIt != transactionHistory.end())
+        {
+            history.push_back(txnIt->second);
+        }
+    }
+    sort(history.begin(), history.end(), newestFirst);
+    if (limit >= 0 && history.size() > static_cast<size_t>(limit))
+    {
+        history.resize(limit);
+    }
+    return history;
+}
+
+// Get customer transaction history (newest first, at most limit entries)
+vector<Transaction> TransactionManager::getCustomerHistory(string customerId, int limit) const
+{
+    vector<Transaction> history;
+    auto range = customerTransactions.equal_range(customerId);
+    for (auto it = range.first; it != range.second; ++it)
+    {
+        auto txnIt = transactionHistory.find(it->second);
+        if (txnIt != transactionHistory.end())
+        {
+            history.push_back(txnIt->second);
+        }
+    }
+    sort(history.begin(), history.end(), newestFirst);
+    if (limit >= 0 && history.size() > static_cast<size_t>(limit))
+    {
+        history.resize(limit);
+    }
+    return history;
+}
+
+// Get transactions by type (newest first)
+vector<Transaction> TransactionManager::getTransactionsByType(TransactionType type, int limit) const
+{
+    vector<Transaction> transactions;
+    for (const auto &pair : transactionHistory)
+    {
+        if (pair.second.getTransactionType() == type)
+        {
+            transactions.push_back(pair.second);
+        }
+    }
+    sort(transactions.begin(), transactions.end(), newestFirst);
+    if (limit >= 0 && transactions.size() > static_cast<size_t>(limit))
+    {
+        transactions.resize(limit);
+    }
+    return transactions;
+}
+
+// Get transactions by date range (inclusive, newest first)
 vector<Transaction> TransactionManager::getTransactionsByDateRange(string startDate, string endDate) const
 {
     vector<Transaction> transactions;
-    for (const auto &pair : dateTransactions)
+    auto begin = startDate.empty() ? dateTransactions.begin() : dateTransactions.lower_bound(startDate);
+    auto end = endDate.empty() ? dateTransactions.end() : dateTransactions.upper_bound(endDate);
+    for (auto it = begin; it != end; ++it)
     {
-        const string &date = pair.first;
-        const string &transactionId = pair.second;
-        if (date >= startDate && date <= endDate)
+        auto txnIt = transactionHistory.find(it->second);
+        if (txnIt != transactionHistory.end())
         {
-            auto it = transactionHistory.find(transactionId);
-            if (it != transactionHistory.end())
-            {
-                transactions.push_back(it->second); // Add transaction to vector
-            }
+            transactions.push_back(txnIt->second);
         }
     }
-    // Sort transactions by timestamp (newest first)
-    sort(transactions.begin(), transactions.end(), [](const Transaction &a, const Transaction &b)
-         {
-             return a.getTimestamp() > b.getTimestamp(); // Newest first
-         });
-    cout << "Retrieved " << transactions.size() << " transactions from "
-         << startDate << " to " << endDate << "." << endl;
-    return transactions; // Return the filtered transactions
+    sort(transactions.begin(), transactions.end(), newestFirst);
+    return transactions;
 }
 
-// Get transactions by amount range
+// Get one account's transactions in a date range (inclusive, newest first)
+vector<Transaction> TransactionManager::getAccountTransactionsByDateRange(string accountNumber, string startDate,
+                                                                          string endDate) const
+{
+    vector<Transaction> transactions;
+    for (const Transaction &txn : getAccountHistory(accountNumber, -1))
+    {
+        if (inDateRange(txn, startDate, endDate))
+        {
+            transactions.push_back(txn);
+        }
+    }
+    return transactions;
+}
+
+// Get transactions by amount range (ascending by amount)
 vector<Transaction> TransactionManager::getTransactionsByAmountRange(double minAmount, double maxAmount) const
 {
     vector<Transaction> transactions;
     for (const auto &pair : transactionHistory)
     {
-        const Transaction &txn = pair.second;
-        double netAmount = txn.getNetAmount();
-        if (netAmount >= minAmount && netAmount <= maxAmount)
+        double amount = pair.second.getAmount();
+        if (amount >= minAmount && amount <= maxAmount)
         {
-            transactions.push_back(txn); // Add to filtered transactions
+            transactions.push_back(pair.second);
         }
     }
-    // Sort transactions by amount (ascending)
     sort(transactions.begin(), transactions.end(), [](const Transaction &a, const Transaction &b)
-         {
-             return a.getNetAmount() < b.getNetAmount(); // Ascending order
-         });
-    cout << "Retrieved " << transactions.size() << " transactions in amount range ["
-         << minAmount << ", " << maxAmount << "]." << endl;
-    return transactions; // Return the filtered transactions
+         { return a.getAmount() < b.getAmount(); });
+    return transactions;
 }
 
-// Get failed transactions
+// Get failed transactions (newest first)
 vector<Transaction> TransactionManager::getFailedTransactions() const
 {
     vector<Transaction> failedTransactions;
     for (const auto &pair : transactionHistory)
     {
-        const Transaction &txn = pair.second;
-        if (txn.getStatus() == TransactionStatus::FAILED)
+        if (pair.second.getStatus() == TransactionStatus::FAILED)
         {
-            failedTransactions.push_back(txn); // Add to failed transactions
+            failedTransactions.push_back(pair.second);
         }
     }
-    // Sort failed transactions by timestamp (newest first)
-    sort(failedTransactions.begin(), failedTransactions.end(), [](const Transaction &a, const Transaction &b)
-         {
-             return a.getTimestamp() > b.getTimestamp(); // Newest first
-         });
-    cout << "Retrieved " << failedTransactions.size() << " failed transactions." << endl;
-    return failedTransactions; // Return the vector of failed transactions
+    sort(failedTransactions.begin(), failedTransactions.end(), newestFirst);
+    return failedTransactions;
 }
 
-// Get pending transactions
+// Get pending transactions (oldest first)
 vector<Transaction> TransactionManager::getPendingTransactions() const
 {
     vector<Transaction> pendingTransactions;
     for (const auto &pair : transactionHistory)
     {
-        const Transaction &txn = pair.second;
-        if (txn.getStatus() == TransactionStatus::PENDING)
+        if (pair.second.getStatus() == TransactionStatus::PENDING)
         {
-            pendingTransactions.push_back(txn); // Add to pending transactions
+            pendingTransactions.push_back(pair.second);
         }
     }
-    // Sort pending transactions by timestamp (oldest first)
-    sort(pendingTransactions.begin(), pendingTransactions.end(), [](const Transaction &a, const Transaction &b)
-         {
-             return a.getTimestamp() < b.getTimestamp(); // Oldest first
-         });
-    cout << "Retrieved " << pendingTransactions.size() << " pending transactions." << endl;
-    return pendingTransactions; // Return the vector of pending transactions
+    sort(pendingTransactions.begin(), pendingTransactions.end());
+    return pendingTransactions;
 }
 
-// Get total withdrawals for account
+// Get transactions at or above a threshold amount (largest first)
+vector<Transaction> TransactionManager::getLargeTransactions(double threshold) const
+{
+    vector<Transaction> largeTransactions;
+    for (const auto &pair : transactionHistory)
+    {
+        if (pair.second.getAmount() >= threshold)
+        {
+            largeTransactions.push_back(pair.second);
+        }
+    }
+    sort(largeTransactions.begin(), largeTransactions.end(), [](const Transaction &a, const Transaction &b)
+         { return a.getAmount() > b.getAmount(); });
+    return largeTransactions;
+}
+
+// Most recent balance-affecting transaction for an account (nullptr if none)
+const Transaction *TransactionManager::getLatestAccountTransaction(string accountNumber) const
+{
+    const Transaction *latest = nullptr;
+    auto range = accountTransactions.equal_range(accountNumber);
+    for (auto it = range.first; it != range.second; ++it)
+    {
+        const Transaction *txn = findTransaction(it->second);
+        if (txn && txn->affectsBalance() && (!latest || *latest < *txn))
+        {
+            latest = txn;
+        }
+    }
+    return latest;
+}
+
+// Total credits (deposits, incoming transfers, interest, loan disbursements, openings)
+double TransactionManager::getTotalDeposits(string accountNumber, string startDate, string endDate) const
+{
+    double totalDeposits = 0.0;
+    for (const Transaction &txn : getAccountHistory(accountNumber, -1))
+    {
+        if (txn.affectsBalance() && txn.isCredit() && inDateRange(txn, startDate, endDate))
+        {
+            totalDeposits += txn.getAmount();
+        }
+    }
+    return roundMoney(totalDeposits);
+}
+
+// Total debits (withdrawals, outgoing transfers, fees, loan payments, closings)
 double TransactionManager::getTotalWithdrawals(string accountNumber, string startDate, string endDate) const
 {
     double totalWithdrawals = 0.0;
-    vector<Transaction> history = getAccountHistory(accountNumber, INT_MAX); // Get all transactions
-    for (const Transaction &txn : history)
+    for (const Transaction &txn : getAccountHistory(accountNumber, -1))
     {
-        if (txn.getTransactionType() == TransactionType::WITHDRAWAL ||
-            (txn.getTransactionType() == TransactionType::TRANSFER_OUT))
+        if (txn.affectsBalance() && !txn.isCredit() && txn.getTransactionType() != TransactionType::UNKNOWN &&
+            inDateRange(txn, startDate, endDate))
         {
-            if (startDate.empty() || endDate.empty() ||
-                (txn.getTimestamp() >= startDate && txn.getTimestamp() <= endDate))
-            {
-                totalWithdrawals += txn.getAmount(); // Add to total withdrawals
-            }
+            totalWithdrawals += txn.getAmount();
         }
     }
-    cout << "Total withdrawals for account " << accountNumber << ": "
-         << fixed << setprecision(2) << totalWithdrawals << endl;
-    return totalWithdrawals; // Return total withdrawals
+    return roundMoney(totalWithdrawals);
 }
 
 // Get net flow for account
 double TransactionManager::getNetFlow(string accountNumber, string startDate, string endDate) const
 {
-    double totalDeposits = getTotalDeposits(accountNumber, startDate, endDate);
-    double totalWithdrawals = getTotalWithdrawals(accountNumber, startDate, endDate);
-    double netFlow = totalDeposits - totalWithdrawals;
-    cout << "Net flow for account " << accountNumber << ": "
-         << fixed << setprecision(2) << netFlow << endl;
-    return netFlow; // Return net flow
+    return roundMoney(getTotalDeposits(accountNumber, startDate, endDate) -
+                      getTotalWithdrawals(accountNumber, startDate, endDate));
 }
 
 // Get transaction count for account
 int TransactionManager::getTransactionCount(string accountNumber, string startDate, string endDate) const
 {
-    vector<Transaction> history = getAccountHistory(accountNumber, INT_MAX); // Get all transactions
-    int count = 0;
-    for (const Transaction &txn : history)
-    {
-        if (startDate.empty() || endDate.empty() ||
-            (txn.getTimestamp() >= startDate && txn.getTimestamp() <= endDate))
-        {
-            count++; // Increment count for each transaction in date range
-        }
-    }
-    cout << "Transaction count for account " << accountNumber << ": "
-         << count << endl;
-    return count; // Return transaction count
+    return static_cast<int>(getAccountTransactionsByDateRange(accountNumber, startDate, endDate).size());
 }
 
 // Get average transaction amount by type
 double TransactionManager::getAverageTransactionAmount(string accountNumber, TransactionType type) const
 {
-    vector<Transaction> history = getAccountHistory(accountNumber, INT_MAX); // Get all transactions
     double totalAmount = 0.0;
     int count = 0;
-    for (const Transaction &txn : history)
+    for (const Transaction &txn : getAccountHistory(accountNumber, -1))
     {
-        if (txn.getTransactionType() == type)
+        if (txn.getTransactionType() == type && txn.affectsBalance())
         {
-            totalAmount += txn.getAmount(); // Add to total amount
-            count++;                        // Increment count
+            totalAmount += txn.getAmount();
+            count++;
         }
     }
-    double average = (count > 0) ? (totalAmount / count) : 0.0; // Calculate average
-    cout << "Average transaction amount for account " << accountNumber
-         << " of type " << static_cast<int>(type) << ": "
-         << fixed << setprecision(2) << average << endl;
-    return average; // Return average amount
+    return count > 0 ? roundMoney(totalAmount / count) : 0.0;
+}
+
+// Cash withdrawals made from an account on a given date (for the daily limit)
+double TransactionManager::getDailyWithdrawalTotal(string accountNumber, string date) const
+{
+    double total = 0.0;
+    for (const Transaction &txn : getAccountTransactionsByDateRange(accountNumber, date, date))
+    {
+        if (txn.getTransactionType() == TransactionType::WITHDRAWAL && txn.isSuccessful())
+        {
+            total += txn.getAmount();
+        }
+    }
+    return roundMoney(total);
 }
 
 // Get current date and time
 string TransactionManager::getCurrentDateTime() const
 {
-    return ::getCurrentDateTime(); // Use the global function from Utilities
+    return ::getCurrentDateTime();
+}
+
+// Get current date
+string TransactionManager::getCurrentDate() const
+{
+    return ::getCurrentDate();
+}
+
+// Print a list of transactions as a table
+void TransactionManager::displayTransactionTable(const vector<Transaction> &transactions)
+{
+    cout << left << setw(19) << "Transaction ID"
+         << setw(21) << "Timestamp"
+         << setw(18) << "Type"
+         << right << setw(14) << "Amount"
+         << setw(14) << "Balance"
+         << "  " << left << "Description" << endl;
+    cout << string(110, '-') << endl;
+    for (const Transaction &txn : transactions)
+    {
+        string description = txn.getDescription();
+        if (txn.getStatus() != TransactionStatus::COMPLETED)
+        {
+            description += " [" + txn.getStatusString() + "]";
+        }
+        cout << left << setw(19) << txn.getTransactionId()
+             << setw(21) << txn.getTimestamp()
+             << setw(18) << txn.getTransactionTypeString()
+             << right << setw(14) << formatCurrency(txn.getNetAmount())
+             << setw(14) << formatCurrency(txn.getBalanceAfter())
+             << "  " << left << description << endl;
+    }
+    if (transactions.empty())
+    {
+        cout << "No transactions found." << endl;
+    }
+}
+
+// Display transaction history for account
+void TransactionManager::displayTransactionHistory(string accountNumber, int limit) const
+{
+    vector<Transaction> history = getAccountHistory(accountNumber, limit);
+    cout << "Transaction History for Account " << accountNumber
+         << " (latest " << history.size() << ")" << endl;
+    cout << string(110, '=') << endl;
+    displayTransactionTable(history);
+    cout << string(110, '-') << endl;
+    cout << "Total Credits : " << formatCurrency(getTotalDeposits(accountNumber)) << endl;
+    cout << "Total Debits  : " << formatCurrency(getTotalWithdrawals(accountNumber)) << endl;
+    cout << "Net Flow      : " << formatCurrency(getNetFlow(accountNumber)) << endl;
 }
 
 // Display customer transaction summary
@@ -1132,318 +891,359 @@ void TransactionManager::displayCustomerTransactionSummary(string customerId) co
 {
     cout << "\n=== Transaction Summary for Customer: " << customerId << " ===" << endl;
 
-    vector<Transaction> customerTxns = getCustomerHistory(customerId, 100);
+    vector<Transaction> customerTxns = getCustomerHistory(customerId, -1);
     if (customerTxns.empty())
     {
         cout << "No transactions found for this customer." << endl;
         return;
     }
 
-    // Calculate statistics
-    double totalDeposits = 0, totalWithdrawals = 0, totalTransfers = 0, totalFees = 0, totalInterest = 0;
-    int depositCount = 0, withdrawalCount = 0, transferCount = 0, feeCount = 0, interestCount = 0, otherCount = 0;
-
+    map<TransactionType, pair<int, double>> byType;
+    double netFlow = 0.0;
     for (const auto &txn : customerTxns)
     {
-        switch (txn.getTransactionType())
-        {
-        case TransactionType::DEPOSIT:
-            totalDeposits += txn.getAmount();
-            depositCount++;
-            break;
-        case TransactionType::WITHDRAWAL:
-            totalWithdrawals += txn.getAmount();
-            withdrawalCount++;
-            break;
-        case TransactionType::TRANSFER_IN:
-        case TransactionType::TRANSFER_OUT:
-            totalTransfers += txn.getAmount();
-            transferCount++;
-            break;
-        case TransactionType::FEE_CHARGE:
-            totalFees += txn.getAmount();
-            feeCount++;
-            break;
-        case TransactionType::INTEREST_CREDIT:
-            totalInterest += txn.getAmount();
-            interestCount++;
-            break;
-        case TransactionType::ACCOUNT_OPENING:
-        case TransactionType::ACCOUNT_CLOSING:
-        default:
-            otherCount++;
-            break;
-        }
+        if (!txn.affectsBalance()) continue;
+        byType[txn.getTransactionType()].first++;
+        byType[txn.getTransactionType()].second += txn.getAmount();
+        netFlow += txn.getNetAmount();
     }
 
-    // Update the display section to include new categories:
     cout << "Total Transactions: " << customerTxns.size() << endl;
-    cout << "Deposits: " << depositCount << " ($" << fixed << setprecision(2) << totalDeposits << ")" << endl;
-    cout << "Withdrawals: " << withdrawalCount << " ($" << fixed << setprecision(2) << totalWithdrawals << ")" << endl;
-    cout << "Transfers: " << transferCount << " ($" << fixed << setprecision(2) << totalTransfers << ")" << endl;
-    cout << "Fees: " << feeCount << " ($" << fixed << setprecision(2) << totalFees << ")" << endl;
-    cout << "Interest: " << interestCount << " ($" << fixed << setprecision(2) << totalInterest << ")" << endl;
-    cout << "Other: " << otherCount << endl;
-    cout << "Net Flow: $" << fixed << setprecision(2) << (totalDeposits + totalInterest - totalWithdrawals - totalFees) << endl;
-
-    // Display recent transactions
-    cout << "\nRecent Transactions (Last 5):" << endl;
-    cout << left << setw(15) << "Transaction ID" << setw(12) << "Type" << setw(10) << "Amount" << setw(12) << "Date" << endl;
-    cout << string(50, '-') << endl;
-
-    int count = 0;
-    for (const auto &txn : customerTxns)
+    for (const auto &[type, stats] : byType)
     {
-        if (count >= 5)
-            break;
-        cout << left << setw(15) << txn.getTransactionId()
-             << setw(12) << txn.getTransactionTypeString()
-             << setw(10) << fixed << setprecision(2) << txn.getAmount()
-             << setw(12) << txn.getTimestamp().substr(0, 10) << endl;
-        count++;
+        cout << "  " << left << setw(18) << Transaction::typeToString(type)
+             << right << setw(5) << stats.first << "  " << setw(14) << formatCurrency(stats.second) << endl;
     }
-    cout << "======================================================" << endl;
+    cout << "Net Flow: " << formatCurrency(netFlow) << endl;
+
+    cout << "\nRecent Transactions (Last 5):" << endl;
+    vector<Transaction> recent(customerTxns.begin(), customerTxns.begin() + min<size_t>(5, customerTxns.size()));
+    displayTransactionTable(recent);
 }
+
 // Get total transaction count
 int TransactionManager::getTotalTransactionCount() const
 {
-    return transactionHistory.size();
+    return static_cast<int>(transactionHistory.size());
 }
 
-// Get total system volume
+// Get total system volume (sum of all money moved by completed transactions)
 double TransactionManager::getTotalSystemVolume() const
 {
     double totalVolume = 0.0;
-    for (const auto &txn : transactionHistory)
+    for (const auto &pair : transactionHistory)
     {
-        totalVolume += txn.second.getNetAmount(); // Sum net amounts of all transactions
+        if (pair.second.affectsBalance())
+        {
+            totalVolume += pair.second.getAmount();
+        }
     }
-    return totalVolume;
+    return roundMoney(totalVolume);
 }
+
 // Display transactions by type
 void TransactionManager::displayTransactionsByType(TransactionType type, int limit) const
 {
     vector<Transaction> transactions = getTransactionsByType(type, limit);
-    cout << "Transactions of Type: " << static_cast<int>(type) << endl;
-    cout << "--------------------------------------------------------" << endl;
-    cout << left << setw(15) << "Transaction ID"
-         << setw(20) << "Account Number"
-         << setw(10) << "Amount"
-         << setw(20) << "Date"
-         << setw(20) << "Status"
-         << setw(30) << "Description" << endl;
-    cout << "--------------------------------------------------------" << endl;
+    cout << "Transactions of Type: " << Transaction::typeToString(type) << endl;
+    cout << string(110, '=') << endl;
+    displayTransactionTable(transactions);
     double totalAmount = 0.0;
     for (const Transaction &txn : transactions)
     {
-        cout << left << setw(15) << txn.getTransactionId()
-             << setw(20) << txn.getAccountNumber()
-             << setw(10) << fixed << setprecision(2) << txn.getAmount()
-             << setw(20) << txn.getTimestamp().substr(0, 10)
-             << setw(20) << txn.getStatusString()
-             << setw(30) << txn.getDescription() << endl;
-        totalAmount += txn.getAmount(); // Accumulate total amount
+        totalAmount += txn.getAmount();
     }
-    cout << "--------------------------------------------------------" << endl;
-    cout << left << setw(15) << "Total"
-         << setw(20) << ""
-         << setw(10) << fixed << setprecision(2) << totalAmount
-         << setw(20) << ""
-         << setw(20) << ""
-         << setw(30) << "" << endl;
-    cout << "Total Transactions: " << transactions.size() << endl;
-    cout << "Total Amount: " << fixed << setprecision(2) << totalAmount << endl;
-    cout << "--------------------------------------------------------" << endl;
-    cout << "End of Transactions of Type: " << static_cast<int>(type) << endl;
-    cout << "--------------------------------------------------------" << endl;
+    cout << string(110, '-') << endl;
+    cout << "Total Transactions: " << transactions.size()
+         << "   Total Amount: " << formatCurrency(totalAmount) << endl;
 }
 
 // Display daily transaction summary
 void TransactionManager::displayDailyTransactionSummary(string date) const
 {
     vector<Transaction> transactions = getTransactionsByDateRange(date, date);
+    cout << "Daily Transaction Summary for " << date << endl;
+    cout << string(60, '=') << endl;
     if (transactions.empty())
     {
-        cout << "No transactions found for date: " << date << endl;
-        return; // No transactions for the date
+        cout << "No transactions found for this date." << endl;
+        return;
     }
 
-    // Group transactions by type
-    map<TransactionType, vector<Transaction>> groupedTransactions;
-    for (const auto &txn : transactions)
-    {
-        groupedTransactions[txn.getTransactionType()].push_back(txn);
-    }
-
-    // Calculate totals for each type
-    map<TransactionType, double> typeTotals;
-    for (const auto &[type, txns] : groupedTransactions)
-    {
-        double total = 0.0;
-        for (const auto &txn : txns)
-        {
-            total += txn.getAmount();
-        }
-        typeTotals[type] = total;
-    }
-
-    // Display report
-    cout << "Daily Transaction Summary for Date: " << date << endl;
-    cout << "--------------------------------------------------------" << endl;
-    for (const auto &[type, total] : typeTotals)
-    {
-        cout << "Transaction Type: " << static_cast<int>(type) << endl;
-        cout << "Total Transactions: " << groupedTransactions[type].size() << endl;
-        cout << "Total Amount: " << fixed << setprecision(2) << total << endl;
-        cout << "--------------------------------------------------------" << endl;
-    }
-
-    // Display all transactions
-    cout << "All Transactions for Date: " << date << endl;
-    cout << "--------------------------------------------------------" << endl;
-    for (const auto &txn : transactions)
-    {
-        cout << left << setw(15) << txn.getTransactionId()
-             << setw(20) << txn.getAccountNumber()
-             << setw(10) << fixed << setprecision(2) << txn.getAmount()
-             << setw(20) << txn.getTimestamp().substr(0, 10)
-             << setw(20) << txn.getStatusString()
-             << setw(30) << txn.getDescription() << endl;
-    }
-    cout << "--------------------------------------------------------" << endl;
+    map<TransactionType, pair<int, double>> byType;
     double netFlow = 0.0;
     for (const auto &txn : transactions)
     {
-        netFlow += txn.getNetAmount(); // Calculate net flow for the day
+        if (!txn.affectsBalance()) continue;
+        byType[txn.getTransactionType()].first++;
+        byType[txn.getTransactionType()].second += txn.getAmount();
+        netFlow += txn.getNetAmount();
     }
-    cout << "Net Flow for Date: " << date << " is " << fixed << setprecision(2) << netFlow << endl;
-    cout << "--------------------------------------------------------" << endl;
-    cout << "End of Daily Transaction Summary" << endl;
-    cout << "--------------------------------------------------------" << endl;
-}
-// Validate transaction ID format
-bool TransactionManager::isValidTransactionId(string transactionId) const
-{
-    if (transactionId.size() < 15 || transactionId.substr(0, 3) != "TXN")
+    cout << left << setw(20) << "Type" << right << setw(8) << "Count" << setw(18) << "Amount" << endl;
+    cout << string(60, '-') << endl;
+    for (const auto &[type, stats] : byType)
     {
-        return false; // Invalid prefix
+        cout << left << setw(20) << Transaction::typeToString(type)
+             << right << setw(8) << stats.first << setw(18) << formatCurrency(stats.second) << endl;
     }
-    string datePart = transactionId.substr(3, 10); // Extract date part
-    if (datePart.size() != 10 || datePart[4] != '-' || datePart[7] != '-')
-    {
-        return false; // Invalid date format
-    }
-    string seqPart = transactionId.substr(13); // Extract sequence part
-    if (seqPart.empty() || !isdigit(seqPart[0]))
-    {
-        return false; // Invalid sequence format
-    }
-    return true; // Valid format
+    cout << string(60, '-') << endl;
+    cout << "Transactions: " << transactions.size() << "   Net Flow: " << formatCurrency(netFlow) << endl;
 }
 
-// Get current date (wrapper function)
-string TransactionManager::getCurrentDate() const
+// Display transaction statistics
+void TransactionManager::displayTransactionStatistics() const
 {
-    return ::getCurrentDateTime().substr(0, 10); // Return current date in YYYY-MM-DD format
+    int completed = 0, failed = 0, reversed = 0, pending = 0;
+    map<TransactionType, int> typeCount;
+    for (const auto &pair : transactionHistory)
+    {
+        const Transaction &txn = pair.second;
+        typeCount[txn.getTransactionType()]++;
+        switch (txn.getStatus())
+        {
+        case TransactionStatus::COMPLETED: completed++; break;
+        case TransactionStatus::FAILED:    failed++; break;
+        case TransactionStatus::REVERSED:  reversed++; break;
+        case TransactionStatus::PENDING:   pending++; break;
+        default: break;
+        }
+    }
+    cout << "Transaction Statistics" << endl;
+    cout << string(40, '-') << endl;
+    cout << "Total Transactions : " << transactionHistory.size() << endl;
+    cout << "Total Volume       : " << formatCurrency(getTotalSystemVolume()) << endl;
+    cout << "Completed          : " << completed << endl;
+    cout << "Reversed           : " << reversed << endl;
+    cout << "Failed             : " << failed << endl;
+    cout << "Pending            : " << pending << endl;
+    cout << string(40, '-') << endl;
+    for (const auto &pair : typeCount)
+    {
+        cout << "  " << left << setw(18) << Transaction::typeToString(pair.first) << right << setw(6) << pair.second << endl;
+    }
 }
+
+// Save transaction history to file (written to a temp file, then renamed)
+bool TransactionManager::saveTransactionHistory() const
+{
+    try
+    {
+        fs::path target(logFilePath);
+        if (target.has_parent_path())
+        {
+            fs::create_directories(target.parent_path());
+        }
+        string tempPath = logFilePath + ".tmp";
+        {
+            ofstream file(tempPath);
+            if (!file.is_open())
+            {
+                return false;
+            }
+            file << "# id|account|related|type|amount|before|after|timestamp|description|status|customer|session|notes|linked" << endl;
+            for (const auto &pair : transactionHistory)
+            {
+                const Transaction &txn = pair.second;
+                stringstream amount, before, after;
+                amount << fixed << setprecision(2) << txn.getAmount();
+                before << fixed << setprecision(2) << txn.getBalanceBefore();
+                after << fixed << setprecision(2) << txn.getBalanceAfter();
+                file << joinRecord({txn.getTransactionId(), txn.getAccountNumber(), txn.getRelatedAccountNumber(),
+                                    txn.getTransactionTypeString(), amount.str(), before.str(), after.str(),
+                                    txn.getTimestamp(), txn.getDescription(), txn.getStatusString(),
+                                    txn.getCustomerId(), txn.getSessionId(), txn.getNotes(),
+                                    txn.getLinkedTransactionId()})
+                     << '\n';
+            }
+            if (!file.good())
+            {
+                return false;
+            }
+        }
+        fs::rename(tempPath, logFilePath);
+        return true;
+    }
+    catch (const exception &)
+    {
+        return false;
+    }
+}
+
+// Load transaction history from file (replaces anything in memory)
+bool TransactionManager::loadTransactionHistory()
+{
+    ifstream file(logFilePath);
+    if (!file.is_open())
+    {
+        return false; // No saved history yet
+    }
+    clear();
+    string line;
+    while (getline(file, line))
+    {
+        if (trim(line).empty() || line[0] == '#')
+        {
+            continue;
+        }
+        vector<string> f = splitRecord(line);
+        if (f.size() < 14 || f[0].empty())
+        {
+            continue; // Skip malformed lines
+        }
+        Transaction transaction(f[0], f[1], Transaction::typeFromString(f[3]), parseDouble(f[4]),
+                                f[8], parseDouble(f[5]), parseDouble(f[6]), f[10]);
+        transaction.setRelatedAccountNumber(f[2]);
+        transaction.setTimestamp(f[7]);
+        transaction.setStatus(Transaction::statusFromString(f[9]));
+        transaction.setSessionId(f[11]);
+        transaction.setNotes(f[12]);
+        transaction.setLinkedTransactionId(f[13]);
+        addTransaction(transaction);
+    }
+    return true;
+}
+
 // Export transactions to CSV
 bool TransactionManager::exportTransactionsToCSV(string filename, string accountNumber) const
 {
+    try
+    {
+        fs::path target(filename);
+        if (target.has_parent_path())
+        {
+            fs::create_directories(target.parent_path());
+        }
+    }
+    catch (const exception &)
+    {
+        return false;
+    }
     ofstream file(filename);
     if (!file.is_open())
     {
-        cout << "Failed to open file for writing: " << filename << endl;
-        return false; // File could not be opened
+        return false;
     }
 
-    // Write CSV header
-    file << "ID,Account,Type,Amount,Date,Status,Description" << endl;
-
-    // Write each transaction as CSV row
-    for (const auto &txn : transactionHistory)
+    file << "ID,Timestamp,Account,Related Account,Type,Amount,Balance Before,Balance After,Status,Description" << endl;
+    vector<Transaction> transactions = accountNumber.empty() ? getAllTransactions() : getAccountHistory(accountNumber, -1);
+    reverse(transactions.begin(), transactions.end()); // Chronological order for statements
+    for (const auto &txn : transactions)
     {
-        if (!accountNumber.empty() && txn.second.getAccountNumber() != accountNumber)
-        {
-            continue; // Skip transactions not matching accountNumber
-        }
-        file << txn.second.getTransactionId() << ","
-             << txn.second.getAccountNumber() << ","
-             << static_cast<int>(txn.second.getTransactionType()) << ","
-             << fixed << setprecision(2) << txn.second.getAmount() << ","
-             << txn.second.getTimestamp().substr(0, 10) << ","
-             << txn.second.getStatusString() << ","
-             << txn.second.getDescription() << endl;
+        file << txn.getTransactionId() << ","
+             << txn.getTimestamp() << ","
+             << txn.getAccountNumber() << ","
+             << txn.getRelatedAccountNumber() << ","
+             << txn.getTransactionTypeString() << ","
+             << fixed << setprecision(2) << txn.getNetAmount() << ","
+             << txn.getBalanceBefore() << ","
+             << txn.getBalanceAfter() << ","
+             << txn.getStatusString() << ","
+             << csvField(txn.getDescription()) << endl;
     }
-
-    file.close();
-    return true; // Export successful
+    return file.good();
 }
 
 // Create backup of transaction data
 bool TransactionManager::createBackup(string backupPath) const
 {
-    string backupFile = backupPath + "/transaction_backup_" + getCurrentDateTime() + ".log";
-    ifstream src(logFilePath, ios::binary);
-    ofstream dst(backupFile, ios::binary);
-    if (!src.is_open() || !dst.is_open())
+    try
     {
-        cout << "Failed to create backup file: " << backupFile << endl;
-        return false; // Backup file could not be opened
+        string stamp = ::getCurrentDateTime();
+        replace(stamp.begin(), stamp.end(), ' ', '_');
+        replace(stamp.begin(), stamp.end(), ':', '-');
+        fs::create_directories(backupPath);
+        fs::path backupFile = fs::path(backupPath) / ("transactions_" + stamp + ".dat");
+        fs::copy_file(logFilePath, backupFile, fs::copy_options::overwrite_existing);
+        return true;
     }
-    dst << src.rdbuf(); // Copy contents
-    src.close();
-    dst.close();
-    cout << "Backup created successfully at: " << backupFile << endl;
-    return true; // Backup successful
+    catch (const exception &)
+    {
+        return false;
+    }
 }
 
-// Cleanup old transactions (archival)
-void TransactionManager::cleanupOldTransactions(int daysOld)
+void TransactionManager::setLogFilePath(string path)
 {
-    string cutoffDate = getCurrentDateTime(); // Placeholder for actual cutoff date calculation
-    cout << "Cleaning up transactions older than " << daysOld << " days..." << endl;
+    logFilePath = path;
+}
+
+string TransactionManager::getLogFilePath() const
+{
+    return logFilePath;
+}
+
+// Remove all transactions from memory
+void TransactionManager::clear()
+{
+    transactionHistory.clear();
+    accountTransactions.clear();
+    customerTransactions.clear();
+    dateTransactions.clear();
+    nextTransactionNumber = 1;
+}
+
+// Generate unique transaction ID: TXN + YYYYMMDD + 6-digit global sequence
+string TransactionManager::generateTransactionId()
+{
+    string dateStr = ::getCurrentDate();
+    dateStr.erase(remove(dateStr.begin(), dateStr.end(), '-'), dateStr.end());
+
+    stringstream ss;
+    ss << "TXN" << dateStr << setfill('0') << setw(6) << nextTransactionNumber++;
+    return ss.str();
+}
+
+// Validate transaction ID format: TXN + 8-digit date + 6+ digit sequence
+bool TransactionManager::isValidTransactionId(string transactionId) const
+{
+    if (transactionId.size() < 17 || transactionId.compare(0, 3, "TXN") != 0)
+    {
+        return false;
+    }
+    for (size_t i = 3; i < transactionId.size(); i++)
+    {
+        if (!isdigit(static_cast<unsigned char>(transactionId[i])))
+        {
+            return false;
+        }
+    }
+    string date = transactionId.substr(3, 4) + "-" + transactionId.substr(7, 2) + "-" + transactionId.substr(9, 2);
+    return isValidDate(date);
+}
+
+// Remove transactions older than daysOld days; returns how many were removed
+int TransactionManager::cleanupOldTransactions(int daysOld)
+{
+    string cutoffDate = addDaysToDate(::getCurrentDate(), -daysOld);
     int removedCount = 0;
     for (auto it = transactionHistory.begin(); it != transactionHistory.end();)
     {
-        const Transaction &txn = it->second;
-        if (txn.getTimestamp() < cutoffDate) // Check if transaction is older than cutoff
+        if (it->second.getDate() < cutoffDate)
         {
-            // Remove from all indexes
-            accountTransactions.erase(txn.getAccountNumber());
-            customerTransactions.erase(txn.getCustomerId());
-            dateTransactions.erase(txn.getTimestamp().substr(0, 10)); // Use date part only
-            it = transactionHistory.erase(it);                        // Remove from history and get next iterator
-            removedCount++;                                           // Increment removed count
-            cout << "Removed transaction: " << txn.getTransactionId() << endl;
+            it = transactionHistory.erase(it);
+            removedCount++;
         }
         else
         {
-            ++it; // Move to next transaction
+            ++it;
         }
     }
-    cout << "Cleanup complete. Removed " << removedCount << " old transactions." << endl;
+    if (removedCount > 0)
+    {
+        reindexTransactions();
+    }
+    return removedCount;
 }
-// Rebuild transaction indexes
+
+// Rebuild transaction indexes from the main history map
 void TransactionManager::reindexTransactions()
 {
-    cout << "Rebuilding transaction indexes..." << endl;
     accountTransactions.clear();
     customerTransactions.clear();
     dateTransactions.clear();
     for (const auto &pair : transactionHistory)
     {
-        const Transaction &txn = pair.second;
-        accountTransactions.emplace(txn.getAccountNumber(), txn.getTransactionId());
-        customerTransactions.emplace(txn.getCustomerId(), txn.getTransactionId());
-        dateTransactions.emplace(txn.getTimestamp().substr(0, 10), txn.getTransactionId()); // Use date part only
+        indexTransaction(pair.second);
+        updateNextTransactionNumber(pair.first);
     }
-    cout << "Transaction indexes rebuilt successfully." << endl;
-    cout << "Total Transactions: " << transactionHistory.size() << endl;
-    cout << "Total Accounts: " << accountTransactions.size() << endl;
-    cout << "Total Customers: " << customerTransactions.size() << endl;
-    cout << "Total Dates: " << dateTransactions.size() << endl;
-    cout << "Reindexing complete." << endl;
-    cout << "--------------------------------------------------------" << endl;
-    cout << "End of Transaction Manager Operations" << endl;
-    cout << "--------------------------------------------------------" << endl;
 }

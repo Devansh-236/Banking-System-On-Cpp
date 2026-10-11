@@ -4,52 +4,32 @@
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
+#include <stdexcept>
 
 using namespace std;
 
 // =============================================================================
-// CONSTRUCTOR AND DESTRUCTOR
+// CONSTRUCTOR
 // =============================================================================
 
 // Constructor
 Customer::Customer(string id, string customerName, string addr, string phone, string mail, string pin) {
-    if (id.empty() || customerName.empty() || addr.empty() || phone.empty() || mail.empty() || pin.empty()) {
+    if (id.empty() || trim(customerName).empty() || trim(addr).empty() || phone.empty() || mail.empty() || pin.empty()) {
         throw invalid_argument("All fields must be provided and cannot be empty.");
     }
     if (!isValidEmail(mail)) {
         throw invalid_argument("Invalid email format.");
     }
     customerId = id;
-    name = customerName;
-    address = addr;
-    phoneNumber = phone;
-    email = mail;
-    hashedPin = simpleHash(pin);
+    name = trim(customerName);
+    address = trim(addr);
+    phoneNumber = trim(phone);
+    email = trim(mail);
+    hashedPin = hashPin(pin, customerId);
     registrationDate = getCurrentDate();
     isActive = true;
-    accounts = vector<Account*>();
-    // Display success message
-    cout << "Customer created successfully with ID: " << customerId << endl;
-    cout << "Registration Date: " << registrationDate << endl;
-    cout << "Customer is active: " << (isActive ? "Yes" : "No") << endl;
-    cout << "Customer Name: " << name << endl;
-    cout << "Customer Address: " << address << endl;
-    cout << "Customer Phone: " << phoneNumber << endl;
-    cout << "Customer Email: " << email << endl;
-    cout << "Customer accounts initialized (empty)." << endl;
-    cout << "----------------------------------------" << endl;
-}
-
-
-// Destructor
-Customer::~Customer() {
-    for (Account* account : accounts) {
-        delete account; // Assuming Account objects are dynamically allocated
-    }
-    accounts.clear();
-    cout << "Customer with ID: " << customerId << " has been deleted." << endl;
-    cout << "All associated accounts have been cleaned up." << endl;
-    cout << "----------------------------------------" << endl;
+    failedLoginAttempts = 0;
+    isLocked = false;
 }
 
 // =============================================================================
@@ -73,17 +53,11 @@ string Customer::getAddress() const {
 
 // Get phone number
 string Customer::getPhoneNumber() const {
-    if (phoneNumber.empty()) {
-        return "Phone number not provided.";
-    }
     return phoneNumber;
 }
 
 // Get email address
 string Customer::getEmail() const {
-    if (email.empty()) {
-        return "Email not provided.";
-    }
     return email;
 }
 
@@ -104,59 +78,39 @@ bool Customer::isCustomerActive() const {
 
 // Get total number of accounts
 int Customer::getAccountCount() const {
-    return accounts.size();
+    return static_cast<int>(accounts.size());
 }
 
 // =============================================================================
 // ACCOUNT MANAGEMENT FUNCTIONS
 // =============================================================================
 
-// Add an account to customer
-void Customer::addAccount(Account* account) {
+// Link an account to this customer
+bool Customer::addAccount(Account* account) {
     if (account == nullptr) {
-        cout << "Error: Cannot add a null account." << endl;
-        return;
+        return false;
     }
     if (hasAccount(account->getAccountNumber())) {
-        cout << "Error: Account with number " << account->getAccountNumber() << " already exists for this customer." << endl;
-        return;
+        return false;
     }
     if (account->getCustomerId() != customerId) {
-        cout << "Error: Account does not belong to this customer." << endl;
-        return;
+        return false;
     }
     accounts.push_back(account);
-    cout << "Account with number " << account->getAccountNumber() << " added successfully." << endl;
-    cout << "Account Type: " << (account->getAccountType() == AccountType::SAVINGS ? "SAVINGS" : "CHECKING") << endl;
-    cout << "Account Balance: $" << fixed << setprecision(2) << account->getBalance() << endl;
-    cout << "Account Status: " << (account->isAccountActive() ? "Active" : "Inactive") << endl;
-    cout << "----------------------------------------" << endl;
+    return true;
 }
 
-// Remove an account by account number
+// Unlink an account by account number (the Bank owns and frees the object)
 bool Customer::removeAccount(string accountNumber) {
-    if (accountNumber.empty()) {
-        cout << "Error: Account number cannot be empty." << endl;
+    auto it = find_if(accounts.begin(), accounts.end(),
+                      [&accountNumber](Account* account) {
+                          return account->getAccountNumber() == accountNumber;
+                      });
+    if (it == accounts.end()) {
         return false;
     }
-    if (!hasAccount(accountNumber)) {
-        cout << "Error: Account with number " << accountNumber << " does not exist." << endl;
-        return false;
-    }
-
-    auto it = std::remove_if(accounts.begin(), accounts.end(),
-        [&accountNumber](Account* account) {
-            return account->getAccountNumber() == accountNumber;
-        });
-    if (it != accounts.end()) {
-        delete *it; // Delete the account object
-        accounts.erase(it, accounts.end()); // Remove from vector
-        cout << "Account with number " << accountNumber << " removed successfully." << endl;
-        return true;
-    } else {
-        cout << "Error: Account with number " << accountNumber << " not found." << endl;
-        return false;
-    }
+    accounts.erase(it);
+    return true;
 }
 
 // Find an account by account number
@@ -171,8 +125,7 @@ Account* Customer::findAccount(string accountNumber) const {
 
 // Check if customer has a specific account
 bool Customer::hasAccount(string accountNumber) const {
-    Account* account = findAccount(accountNumber);
-    return (account != nullptr);
+    return findAccount(accountNumber) != nullptr;
 }
 
 // Get accounts by type (SAVINGS or CHECKING)
@@ -193,72 +146,89 @@ vector<Account*> Customer::getAccountsByType(AccountType type) const {
 // Verify customer PIN
 bool Customer::verifyPin(string inputPin) const {
     if (inputPin.empty()) {
-        cout << "Error: PIN cannot be empty." << endl;
         return false;
     }
-    string hashedInputPin = simpleHash(inputPin);
-    if (hashedInputPin == hashedPin) {
-        cout << "PIN verification successful." << endl;
-        return true;
-    } else {
-        cout << "Error: Incorrect PIN." << endl;
-        return false;
-    }
+    return hashPin(inputPin, customerId) == hashedPin;
 }
 
 // Change customer PIN
 bool Customer::changePin(string oldPin, string newPin) {
     if (!verifyPin(oldPin)) {
-        cout << "Error: Old PIN verification failed." << endl;
         return false;
     }
-    if (newPin.empty() || newPin.length() < 4) {
-        cout << "Error: New PIN must be at least 4 characters long." << endl;
+    return resetPin(newPin);
+}
+
+// Set a new PIN without the old one (admin reset)
+bool Customer::resetPin(string newPin) {
+    if (!isValidPin(newPin)) {
         return false;
     }
-    hashedPin = simpleHash(newPin);
-    cout << "PIN changed successfully." << endl;
-    cout << "New Hashed PIN: " << hashedPin << endl; 
-    return true;  
+    hashedPin = hashPin(newPin, customerId);
+    return true;
+}
+
+// =============================================================================
+// LOGIN LOCKOUT
+// =============================================================================
+
+int Customer::getFailedLoginAttempts() const {
+    return failedLoginAttempts;
+}
+
+bool Customer::isAccountLocked() const {
+    return isLocked;
+}
+
+// Record a failed login; lock the customer once maxAttempts is reached
+bool Customer::recordFailedLogin(int maxAttempts) {
+    failedLoginAttempts++;
+    if (maxAttempts > 0 && failedLoginAttempts >= maxAttempts) {
+        isLocked = true;
+    }
+    return isLocked;
+}
+
+void Customer::resetFailedLogins() {
+    failedLoginAttempts = 0;
+}
+
+void Customer::setLocked(bool locked) {
+    isLocked = locked;
+    if (!locked) {
+        failedLoginAttempts = 0;
+    }
 }
 
 // =============================================================================
 // INFORMATION UPDATE FUNCTIONS
 // =============================================================================
 
-// Update contact information
-void Customer::updateContactInfo(string newAddress, string newPhone, string newEmail) {
+// Update contact information; empty values keep the current value
+bool Customer::updateContactInfo(string newAddress, string newPhone, string newEmail) {
+    newAddress = trim(newAddress);
+    newPhone = trim(newPhone);
+    newEmail = trim(newEmail);
     if (!newEmail.empty() && !isValidEmail(newEmail)) {
-        cout << "Error: Invalid email format." << endl;
-        return;
+        return false;
     }
     if (!newPhone.empty() && !isValidPhone(newPhone)) {
-        cout << "Error: Invalid phone number format." << endl;
-        return;
+        return false;
     }
-    address = newAddress;
-    phoneNumber = newPhone;
-    email = newEmail;
-    cout << "Contact information updated successfully." << endl;
-    cout << "New Address: " << address << endl;
-    cout << "New Phone: " << phoneNumber << endl;
-    cout << "New Email: " << email << endl;
-    cout << "----------------------------------------" << endl;
+    if (!newAddress.empty()) address = newAddress;
+    if (!newPhone.empty()) phoneNumber = newPhone;
+    if (!newEmail.empty()) email = newEmail;
+    return true;
 }
 
-// Set customer active status
+// Set customer active status (deactivating also freezes every account)
 void Customer::setActive(bool status) {
     isActive = status;
-    if (isActive) {
-        cout << "Customer with ID: " << customerId << " is now active." << endl;
-    } else {
-        cout << "Customer with ID: " << customerId << " is now inactive." << endl;
+    if (!isActive) {
         for (Account* account : accounts) {
-            account->setActive(false); // Assuming Account has setActive method 
+            account->setActive(false);
         }
-    cout << "All accounts for customer " << customerId << " have been deactivated." << endl;
     }
-    cout << "----------------------------------------" << endl;
 }
 
 // =============================================================================
@@ -267,61 +237,52 @@ void Customer::setActive(bool status) {
 
 // Display basic customer information
 void Customer::displayCustomerInfo() const {
-    cout << "Customer ID: " << customerId << endl;
-    cout << "Name: " << name << endl;
-    cout << "Address: " << address << endl;
-    cout << "Phone: " << (phoneNumber.empty() ? "Not provided" : phoneNumber) << endl;
-    cout << "Email: " << (email.empty() ? "Not provided" : email) << endl;
-    cout << "Registration Date: " << registrationDate << endl;
-    cout << "Status: " << (isActive ? "Active" : "Inactive") << endl;
-    cout << "----------------------------------------" << endl; 
+    cout << "Customer ID       : " << customerId << endl;
+    cout << "Name              : " << name << endl;
+    cout << "Address           : " << address << endl;
+    cout << "Phone             : " << (phoneNumber.empty() ? "Not provided" : phoneNumber) << endl;
+    cout << "Email             : " << (email.empty() ? "Not provided" : email) << endl;
+    cout << "Registration Date : " << registrationDate << endl;
+    cout << "Status            : " << (isActive ? "Active" : "Inactive")
+         << (isLocked ? " (LOCKED)" : "") << endl;
 }
 
 // Display account summary (brief info about all accounts)
 void Customer::displayAccountSummary() const {
-    cout << "Account Summary for Customer: " << name << " (ID: " << customerId << ")" << endl;
-    cout << "----------------------------------------" << endl;
-    cout << left << setw(20) << "Account Number"
-         << left << setw(15) << "Account Type"
-         << left << setw(15) << "Balance"
-         << left << setw(10) << "Status" << endl;
-    cout << "----------------------------------------" << endl;
-    double totalBalance = 0.0;
+    cout << "Account Summary for " << name << " (" << customerId << ")" << endl;
+    cout << string(62, '-') << endl;
+    cout << left << setw(16) << "Account Number"
+         << setw(12) << "Type"
+         << right << setw(20) << "Balance"
+         << "   " << left << setw(10) << "Status" << endl;
+    cout << string(62, '-') << endl;
     for (const Account* account : accounts) {
-        cout << left << setw(20) << account->getAccountNumber()
-             << left << setw(15) << (account->getAccountType() == AccountType::SAVINGS ? "SAVINGS" : "CHECKING")
-             << left << setw(15) << fixed << setprecision(2) << account->getBalance()
-             << left << setw(10) << (account->isAccountActive() ? "Active" : "Inactive") << endl;
-        totalBalance += account->getBalance();
+        cout << left << setw(16) << account->getAccountNumber()
+             << setw(12) << account->getAccountTypeString()
+             << right << setw(20) << formatCurrency(account->getBalance())
+             << "   " << left << setw(10) << (account->isAccountActive() ? "Active" : "Frozen") << endl;
     }
-    cout << "----------------------------------------" << endl;
-    cout << "Total Balance: $" << fixed << setprecision(2) << totalBalance << endl;
-    cout << "----------------------------------------" << endl;
-    cout << "Total Active Accounts: " << getTotalActiveAccounts() << endl;
-    cout << "----------------------------------------" << endl;
-    cout << "Total Savings Balance: $" << fixed << setprecision(2) << getTotalSavingsBalance() << endl;
-    cout << "Total Checking Balance: $" << fixed << setprecision(2) << getTotalCheckingBalance() << endl;
-    cout << "----------------------------------------" << endl;
-    cout << "Total Balance Across All Accounts: $" << fixed << setprecision(2) << getTotalBalance() << endl;
-    cout << "----------------------------------------" << endl;
-    cout << "End of Account Summary." << endl;
-    cout << "----------------------------------------" << endl;
+    if (accounts.empty()) {
+        cout << "No accounts yet." << endl;
+    }
+    cout << string(62, '-') << endl;
+    cout << "Savings Total  : " << formatCurrency(getTotalSavingsBalance()) << endl;
+    cout << "Checking Total : " << formatCurrency(getTotalCheckingBalance()) << endl;
+    cout << "Overall Total  : " << formatCurrency(getTotalBalance())
+         << " across " << getTotalActiveAccounts() << " active account(s)" << endl;
 }
 
 // Display detailed information for all accounts
 void Customer::displayDetailedAccountInfo() const {
-    cout << "Detailed Account Information for Customer: " << name << " (ID: " << customerId << ")" << endl;
-    cout << "----------------------------------------" << endl;
+    cout << "Detailed Account Information for " << name << " (" << customerId << ")" << endl;
+    cout << string(50, '-') << endl;
     for (const Account* account : accounts) {
         account->displayAccountInfo();
-        cout << "----------------------------------------" << endl;
+        cout << string(50, '-') << endl;
     }
     if (accounts.empty()) {
         cout << "No accounts found for this customer." << endl;
     }
-    cout << "----------------------------------------" << endl;
-    cout << "End of Detailed Account Information." << endl;
-    cout << "----------------------------------------" << endl;
 }
 
 // =============================================================================
@@ -334,27 +295,25 @@ double Customer::getTotalBalance() const {
     for (const Account* account : accounts) {
         totalBalance += account->getBalance();
     }
-    return totalBalance;
+    return roundMoney(totalBalance);
 }
 
 // Get total savings account balance
 double Customer::getTotalSavingsBalance() const {
-    vector<Account*> savingsAccounts = getAccountsByType(AccountType::SAVINGS);
     double totalSavingsBalance = 0.0;
-    for (const Account* account : savingsAccounts) {
+    for (const Account* account : getAccountsByType(AccountType::SAVINGS)) {
         totalSavingsBalance += account->getBalance();
     }
-    return totalSavingsBalance;
+    return roundMoney(totalSavingsBalance);
 }
 
 // Get total checking account balance
 double Customer::getTotalCheckingBalance() const {
-    vector<Account*> checkingAccounts = getAccountsByType(AccountType::CHECKING);
     double totalCheckingBalance = 0.0;
-    for (const Account* account : checkingAccounts) {
+    for (const Account* account : getAccountsByType(AccountType::CHECKING)) {
         totalCheckingBalance += account->getBalance();
     }
-    return totalCheckingBalance;
+    return roundMoney(totalCheckingBalance);
 }
 
 // Get count of active accounts
